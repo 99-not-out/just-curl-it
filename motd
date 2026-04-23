@@ -1,0 +1,50 @@
+================================================================
+ intercept shim demo shell
+================================================================
+
+ The LD_PRELOAD shim at /usr/local/lib/intercept.so redirects HTTP
+ calls to the hostnames below into a local handler process, which
+ speaks the real wire protocol to a backend in the compose stack.
+
+ Endpoints (all plain HTTP):
+   http://mylocal.hello       tiny bash handler
+   http://mylocal.shim        this shim's own routes/backends
+   http://mylocal.kafka       Kafka
+   http://mylocal.redis       Redis
+   http://mylocal.mongo       MongoDB
+   http://mylocal.postgres    Postgres
+   http://mylocal.rabbit      RabbitMQ
+   http://mylocal.smtp        SMTP (MailHog; UI at http://localhost:8025)
+   http://mylocal.grpc        gRPC helloworld (dynamic via reflection)
+
+   Every endpoint has GET /_info describing its routes and backend.
+
+ Quick tour (up-arrow walks through pre-populated history):
+   curl http://mylocal.hello/ping | jq
+   curl http://mylocal.shim/routes | jq
+   info                                          # /_info from all handlers
+   pgq "select now(), version()"                 # shell helper over postgres
+   kset foo bar && kget foo                      # redis one-liners
+   minsert demo users '{"name":"ada","age":30}'  # mongo insert
+   mfind  demo users '{}'                        # mongo find
+   kprod  demo 'k1|hello' && kpeek demo          # kafka produce + peek
+   rpub   demo 'hi' && rget demo                 # rabbit publish + get
+   mail_send '{"to":"you@x","subject":"hi","body":"curl!"}'
+   grpc_call helloworld.Greeter/SayHello '{"name":"matt"}'
+
+ Streaming (SSE, -N keeps the stream open):
+   curl -N http://mylocal.redis/subscribe/chat            # in one shell
+   kpub chat 'hello'                                      # in another
+   curl -N 'http://mylocal.kafka/topic/demo/consume?from=earliest'
+   curl -N http://mylocal.rabbit/queue/demo/consume
+   pglisten demo      # then, from a separate shell:  pgnotify demo 'ping'
+
+ Cross-backend pipe (curl is the glue):
+   curl -s 'http://mylocal.postgres/query?sql=select+now()' \
+     | jq -r '.rows[0][0]' \
+     | curl -s -X PUT http://mylocal.redis/key/last_pg_time --data-binary @-
+
+ Full guided tour:   demo
+ Debug routing:      INTERCEPT_DEBUG=1 curl ...
+
+================================================================
