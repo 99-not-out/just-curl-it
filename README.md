@@ -1,7 +1,7 @@
 # just curl it
 
 > Talk to Kafka, Postgres, Redis, Mongo, RabbitMQ, gRPC and SMTP with plain `curl`.
-> No client library. No SDK. **Just curl it.**
+> No client library. No SDK. No server. **Just curl it.**
 
 An `LD_PRELOAD` shim hijacks HTTP calls to a set of fake hostnames and pipes them
 to small handler processes that speak each backend's real wire protocol. From
