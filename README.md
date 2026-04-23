@@ -22,6 +22,32 @@ Full guided tour once inside the shell:
 demo
 ```
 
+## Works with
+
+Not just `curl` — anything in the container that resolves a name and opens a
+socket through glibc, which covers most of the Linux ecosystem:
+
+- **HTTP CLIs:** curl, wget, httpie, xh, hurl
+- **Python:** `requests`, `urllib`, `httpx`, `aiohttp`
+- **JVM:** `java.net.HttpClient`, OkHttp, Apache HttpClient, Ktor (Java/Kotlin/Scala/Clojure)
+- **Node.js:** `fetch`, `http`, axios, undici
+- **Ruby:** `Net::HTTP`, Faraday, HTTParty
+- **PHP:** `file_get_contents`, Guzzle, php-curl
+- **Perl:** LWP, `HTTP::Tiny`
+- **Rust:** reqwest, hyper, ureq *(glibc target)*
+- **C/C++:** libcurl — anything calling `getaddrinfo` + `connect`
+- **Erlang / Elixir:** `:httpc`, HTTPoison, Finch
+
+## Doesn't work
+
+- **Go** — bypasses libc for both DNS (pure-Go resolver) and the `connect(2)`
+  syscall, so `LD_PRELOAD` has nothing to hook.
+- **musl-linked binaries** (Alpine, distroless-static) — the shim is a
+  glibc-built `.so` and won't load in a musl process.
+- **Statically-linked binaries** — nothing to preload into.
+- **HTTPS** — handlers speak plain HTTP; no TLS termination.
+- **macOS / Windows** — `LD_PRELOAD` is Linux-only.
+
 ## License
 
 MIT
