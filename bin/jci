@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# jci -- launch a subshell with the intercept shim loaded for a named env.
+set -euo pipefail
+
+JCI_HOME="${JCI_HOME:-$HOME/.just_curl_it}"
+ENVS_DIR="$JCI_HOME/envs"
+HANDLERS_DIR="$JCI_HOME/handlers"
+
+platform()    { uname -s; }
+lib_path()    { case "$(platform)" in Darwin) echo "$JCI_HOME/lib/intercept.dylib";;
+                                       Linux)  echo "$JCI_HOME/lib/intercept.so";; esac; }
+preload_var() { case "$(platform)" in Darwin) echo "DYLD_INSERT_LIBRARIES";;
+                                       Linux)  echo "LD_PRELOAD";; esac; }
+
+# Pick a shell that the OS will actually let DYLD_INSERT_LIBRARIES through.
+# On macOS, SIP strips DYLD_* from /bin/zsh; we need a Homebrew-installed shell.
+pick_shell() {
+    case "$(platform)" in
+        Darwin)
+            for s in /opt/homebrew/bin/zsh /usr/local/bin/zsh \
+                     /opt/homebrew/bin/bash /usr/local/bin/bash; do
+                [ -x "$s" ] && { echo "$s"; return; }
+            done
+            cat >&2 <<EOF
+jci: no Homebrew shell found.
+On macOS, SIP strips DYLD_INSERT_LIBRARIES from /bin/zsh, so the shim
+won't load in the system shell. Install one of:
+    brew install zsh    # then retry
+    brew install bash
+EOF
+            exit 1
+            ;;
+        Linux)  echo "${SHELL:-/bin/bash}" ;;
+        *)      echo "jci: unsupported platform: $(platform)" >&2; exit 1 ;;
+    esac
+}
+
+# On macOS, /usr/bin/curl is SIP-protected and strips DYLD_INSERT_LIBRARIES,
+# so plain `curl` in an activated shell would silently miss interception.
+# Find a brew-installed (keg-only) curl whose dir we can prepend to PATH.
+# Returns the directory, or empty if nothing usable was found / on Linux.
+find_curl_dir() {
+    [ "$(platform)" = "Darwin" ] || return 0
+    if command -v brew >/dev/null 2>&1; then
+        local prefix
+        prefix=$(brew --prefix curl 2>/dev/null) || true
+        if [ -n "$prefix" ] && [ -x "$prefix/bin/curl" ]; then
+            echo "$prefix/bin"; return
+        fi
+    fi
+    local d
+    for d in /opt/homebrew/opt/curl/bin /usr/local/opt/curl/bin \
+             /opt/homebrew/Cellar/curl/*/bin /usr/local/Cellar/curl/*/bin; do
+        [ -x "$d/curl" ] && { echo "$d"; return; }
+    done
+}
+
+cmd_ls() {
+    [ -d "$ENVS_DIR" ] || { echo "no envs at $ENVS_DIR" >&2; exit 0; }
+    local found=0 active_seen=0
+    for d in "$ENVS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        found=1
+        local name; name=$(basename "$d")
+        if [ "$name" = "${JCI_ENV-}" ]; then
+            echo "* $name"
+            active_seen=1
+        else
+            echo "  $name"
+        fi
+    done
+    if [ $found -eq 0 ]; then
+        echo "no envs in $ENVS_DIR"
+        return
+    fi
+    [ $active_seen -eq 1 ] || echo "(no active env)"
+}
+
+cmd_use() {
+    local env_name="${1:-}"
+    [ -n "$env_name" ] || { echo "usage: jci use <env>" >&2; exit 2; }
+
+    local env_dir="$ENVS_DIR/$env_name"
+    [ -d "$env_dir" ] || { echo "jci: no such env: $env_name (try: jci ls)" >&2; exit 1; }
+
+    local lib; lib=$(lib_path)
+    [ -f "$lib" ] || { echo "jci: shim not built at $lib (run: make install)" >&2; exit 1; }
+
+    local sh;  sh=$(pick_shell)
+    local var; var=$(preload_var)
+
+    export "$var=$lib"
+    export INTERCEPT_CONFIG="$env_dir/routes.conf"
+    export INTERCEPT_BACKENDS_CONF="$env_dir/backends.conf"
+    export JCI_HANDLERS="$HANDLERS_DIR"
+    export JCI_ENV="$env_name"
+
+    # On macOS, prepend brew curl's keg-only bin dir to PATH so plain `curl`
+    # resolves to a non-SIP binary that honors DYLD_INSERT_LIBRARIES.
+    local curl_dir; curl_dir=$(find_curl_dir)
+    if [ -n "$curl_dir" ]; then
+        export PATH="$curl_dir:$PATH"
+    elif [ "$(platform)" = "Darwin" ]; then
+        echo "(jci) warning: no brew curl found; /usr/bin/curl will not intercept (SIP)." >&2
+        echo "       install with: brew install curl" >&2
+    fi
+
+    # Prompt prefix: source the user's normal rcfile, then prepend (jci:<env>).
+    # Picks up *whatever* prompt they have, including frameworks like p10k —
+    # though async-rendering frameworks (Starship, p10k transient prompts) may
+    # overwrite PROMPT in precmd; users with those can hook on $JCI_ENV instead.
+    local tag="(jci:$env_name)"
+    local tmpdir; tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/jci.XXXXXX")
+
+    echo "(jci) entered env '$env_name' -- exit shell to deactivate"
+
+    case "$(basename "$sh")" in
+        zsh)
+            local user_zdotdir="${ZDOTDIR:-$HOME}"
+            cat > "$tmpdir/.zshrc" <<EOF
+[ -f "$user_zdotdir/.zshenv" ] && . "$user_zdotdir/.zshenv"
+[ -f "$user_zdotdir/.zshrc" ]  && . "$user_zdotdir/.zshrc"
+unset ZDOTDIR
+PROMPT="%F{cyan}${tag}%f \${PROMPT}"
+trap 'rm -rf "$tmpdir"' EXIT
+EOF
+            export ZDOTDIR="$tmpdir"
+            exec "$sh" -i
+            ;;
+        bash)
+            local rcfile="$tmpdir/bashrc"
+            cat > "$rcfile" <<EOF
+[ -f "\$HOME/.bashrc" ] && . "\$HOME/.bashrc"
+PS1="\\[\\033[36m\\]${tag}\\[\\033[0m\\] \${PS1}"
+trap 'rm -rf "$tmpdir"' EXIT
+EOF
+            exec "$sh" --rcfile "$rcfile" -i
+            ;;
+        *)
+            rm -rf "$tmpdir"
+            exec "$sh" -i
+            ;;
+    esac
+}
+
+cmd_doctor() {
+    local lib; lib=$(lib_path)
+    local sh;  sh=$(pick_shell 2>/dev/null || true)
+
+    echo "JCI_HOME:  $JCI_HOME"
+    echo "platform:  $(platform)"
+    if [ -f "$lib" ]; then echo "shim:      $lib"
+    else                   echo "shim:      MISSING ($lib) -- run 'make install'"; fi
+    if [ -n "$sh" ]; then  echo "shell:     $sh"
+    else                   echo "shell:     MISSING -- see 'jci use' for setup"; fi
+
+    if [ "$(platform)" = "Darwin" ]; then
+        local curl_dir; curl_dir=$(find_curl_dir)
+        if [ -n "$curl_dir" ]; then
+            echo "curl:      $curl_dir/curl (PATH-prepended in 'jci use')"
+        else
+            echo "curl:      MISSING -- /usr/bin/curl is SIP-protected"
+            echo "           install with: brew install curl"
+        fi
+    fi
+
+    if [ -f "$lib" ] && [ -n "$sh" ]; then
+        echo "load test:"
+        local var; var=$(preload_var)
+        # Run a tiny command through the shell with the shim loaded; if SIP
+        # or hardened-runtime strips the env var, we'll see no debug output.
+        env "$var=$lib" INTERCEPT_DEBUG=1 INTERCEPT_CONFIG=/dev/null \
+            "$sh" -c 'true' 2>&1 | sed 's/^/  /' || true
+    fi
+
+    echo "envs:"
+    cmd_ls 2>/dev/null | sed 's/^/  /' || true
+}
+
+usage() {
+    cat <<EOF
+jci -- per-shell HTTP -> protocol shim
+
+Usage:
+  jci ls               list envs
+  jci use <env>        launch a subshell with <env> active
+  jci doctor           preflight checks (especially useful on macOS)
+
+Layout:
+  $JCI_HOME/
+    lib/intercept.{so,dylib}
+    handlers/...
+    envs/<name>/{routes,backends}.conf
+EOF
+}
+
+case "${1-}" in
+    ls)               shift; cmd_ls "$@" ;;
+    use)              shift; cmd_use "$@" ;;
+    doctor)           shift; cmd_doctor "$@" ;;
+    ""|help|-h|--help) usage ;;
+    *) echo "jci: unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac

@@ -42,7 +42,10 @@ def send_mail(data: dict) -> dict:
     msg.set_content(data.get("body", ""))
     if data.get("html"):
         msg.add_alternative(data["html"], subtype="html")
-    with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"])) as s:
+    # Pass an explicit local_hostname; on some macOS systems socket.getfqdn()
+    # returns a trailing newline, which Python 3.14's smtplib refuses to send.
+    with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]),
+                      local_hostname="jci") as s:
         s.send_message(msg)
     return {
         "sent": True,

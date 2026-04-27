@@ -1,6 +1,17 @@
+# build artifacts
+lib/intercept.so
+lib/intercept.dylib
+
+# local settings
+envs
+
+# editor / OS
+.DS_Store
 __pycache__/
 *.py[cod]
-*.egg-info/
-.venv/
-.DS_Store
+
+# IDE
 .claude/settings.local.json
+
+# ctags
+tags

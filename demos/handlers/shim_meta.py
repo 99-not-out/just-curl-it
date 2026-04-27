@@ -18,8 +18,10 @@ from urllib.parse import urlsplit
 from shim import read_request, send_json
 
 HOST = os.environ.get("INTERCEPT_HOST", "")
-ROUTES_PATH = "/etc/intercept/routes.conf"
-BACKENDS_PATH = "/etc/intercept/backends.conf"
+ROUTES_PATH = os.environ.get("INTERCEPT_CONFIG",
+                             "/etc/intercept/routes.conf")
+BACKENDS_PATH = os.environ.get("INTERCEPT_BACKENDS_CONF",
+                               "/etc/intercept/backends.conf")
 
 _INFO = {
     "handler": "shim",

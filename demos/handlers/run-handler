@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Wrapper invoked from routes.conf: runs a Python handler under the venv
+# created by `make demos-install`.
+#
+# Usage:  ${JCI_HANDLERS}/run-handler <name>     -- name without the .py
+set -euo pipefail
+HANDLERS="${JCI_HANDLERS:-$HOME/.just_curl_it/handlers}"
+VENV_PY="$HANDLERS/.venv/bin/python"
+SCRIPT="$HANDLERS/${1:-}.py"
+
+if [ ! -x "$VENV_PY" ]; then
+    echo "no venv at $VENV_PY -- run: make demos-install" >&2
+    exit 1
+fi
+if [ ! -f "$SCRIPT" ]; then
+    echo "no handler script: $SCRIPT" >&2
+    exit 1
+fi
+exec "$VENV_PY" "$SCRIPT"

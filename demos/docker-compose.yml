@@ -1,10 +1,8 @@
-# Bring up backends, then drop into the shim shell:
+# Backend services for the jci 'demos' env.
+# Bring them up:   docker compose up -d
+# Then on the host: jci use demos
 #
-#   docker compose up -d
-#   docker compose run --rm shell
-#
-# Inside the shell, curl speaks plain HTTP to all hostnames below via the
-# LD_PRELOAD shim -- handlers translate to each backend's native wire protocol.
+# All services map to localhost so the host-side jci handlers can reach them.
 
 services:
   postgres:
@@ -18,7 +16,9 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
-    ports: ["5432:5432"]
+    # 5433 on the host so it doesn't collide with Postgres.app / a local postgres
+    # already on 5432. Update backends.conf if you change this.
+    ports: ["5433:5432"]
 
   redis:
     image: redis:7-alpine
@@ -56,11 +56,15 @@ services:
     environment:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
-      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      # Two listeners so internal (controller) and external (host) traffic can
+      # advertise different addresses. The host-facing one advertises localhost
+      # because that's how the host reaches the broker via the port mapping.
+      KAFKA_LISTENERS: "HOST://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "HOST://localhost:9092"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "HOST"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
@@ -83,16 +87,3 @@ services:
   grpc:
     build: ./grpcdemo
     ports: ["50051:50051"]
-
-  shell:
-    build: .
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis:    {condition: service_healthy}
-      mongo:    {condition: service_healthy}
-      rabbit:   {condition: service_healthy}
-      kafka:    {condition: service_healthy}
-      smtp:     {condition: service_started}
-      grpc:     {condition: service_started}
-    stdin_open: true
-    tty: true
