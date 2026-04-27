@@ -24,9 +24,9 @@ install: build
 	@if [ -f lib/intercept.dylib ]; then cp lib/intercept.dylib $(JCI_HOME)/lib/; fi
 	cp bin/jci $(JCI_HOME)/bin/
 	chmod +x  $(JCI_HOME)/bin/jci
-	cp handlers/* $(JCI_HOME)/handlers/
+	find handlers -mindepth 1 -maxdepth 1 -type f -exec cp {} $(JCI_HOME)/handlers/ \;
 	chmod +x  $(JCI_HOME)/handlers/*
-	cp -R envs/. $(JCI_HOME)/envs/
+	@if [ -d envs ]; then cp -R envs/. $(JCI_HOME)/envs/; fi
 	@echo
 	@echo "installed to $(JCI_HOME)"
 	@echo "add to PATH:  export PATH=\"$(JCI_HOME)/bin:\$$PATH\""
