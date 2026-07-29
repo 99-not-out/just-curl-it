@@ -22,6 +22,7 @@ install: build
 	mkdir -p $(JCI_HOME)/lib $(JCI_HOME)/bin $(JCI_HOME)/handlers $(JCI_HOME)/envs
 	@if [ -f lib/intercept.so ];    then cp lib/intercept.so    $(JCI_HOME)/lib/; fi
 	@if [ -f lib/intercept.dylib ]; then cp lib/intercept.dylib $(JCI_HOME)/lib/; fi
+	cp lib/helpers.sh $(JCI_HOME)/lib/
 	cp bin/jci $(JCI_HOME)/bin/
 	chmod +x  $(JCI_HOME)/bin/jci
 	find handlers -mindepth 1 -maxdepth 1 -type f -exec cp {} $(JCI_HOME)/handlers/ \;
@@ -37,7 +38,7 @@ demos-install: install
 	$(PYTHON) -m venv $(JCI_HOME)/handlers/.venv
 	$(JCI_HOME)/handlers/.venv/bin/pip install --quiet --upgrade pip
 	$(JCI_HOME)/handlers/.venv/bin/pip install --quiet -r demos/requirements.txt
-	cp demos/handlers/* $(JCI_HOME)/handlers/
+	find demos/handlers -mindepth 1 -maxdepth 1 -type f -exec cp {} $(JCI_HOME)/handlers/ \;
 	chmod +x $(JCI_HOME)/handlers/*
 	mkdir -p $(JCI_HOME)/envs/demos
 	cp demos/env/routes.conf    $(JCI_HOME)/envs/demos/

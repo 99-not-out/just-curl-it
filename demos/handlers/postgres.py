@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """HTTP -> Postgres adapter spawned per intercepted request.
 
-Routes:
-  GET  /tables                  list tables (excluding system schemas)
-  GET  /query?sql=SELECT...     run SQL, returns {columns, rows, rowCount}
-  POST /query                   body = SQL (text/plain)
-                                or {"sql": "...", "params": [...]}  (application/json)
+Implements `query` shape natively, plus `stream` shape for LISTEN/NOTIFY:
+
+  query shape:
+    GET  /tables                  list tables (excluding system schemas)
+    GET  /query?sql=SELECT...     run SQL, returns {columns, rows, rowCount}
+    POST /query                   body = SQL (text/plain) or
+                                  {"sql": "...", "params": [...]} (application/json)
+
+  stream shape (LISTEN/NOTIFY):
+    POST /stream/<channel>        pg_notify(channel, body); body = payload
+    GET  /stream/<channel>/tail   LISTEN; SSE stream
+    Other /stream/* verbs return 501 (Postgres has no replay/list/purge for these).
 """
 from __future__ import annotations
 
@@ -23,12 +30,14 @@ HOST = os.environ.get("INTERCEPT_HOST", "")
 
 _INFO = {
     "handler": "postgres",
+    "shape": ["query", "stream"],
     "routes": [
-        "GET  /_info",
-        "GET  /tables",
-        "GET  /query?sql=SELECT...",
-        "POST /query                (body = SQL or {sql, params})",
-        "GET  /listen/{channel}     (SSE stream; pair with pg_notify)",
+        "GET    /_info",
+        "GET    /tables",
+        "GET    /query?sql=SELECT...",
+        "POST   /query                  (body = SQL or {sql, params})",
+        "POST   /stream/{channel}       (pg_notify; body = payload)",
+        "GET    /stream/{channel}/tail  (LISTEN; SSE stream)",
     ],
 }
 
@@ -62,8 +71,10 @@ def parse_sql_from_body(headers: dict, body: bytes):
     return body.decode("utf-8"), None
 
 
-def handle_listen(channel: str) -> None:
+def handle_tail(channel: str) -> None:
     import psycopg
+    # LISTEN doesn't accept parameters, so the channel is interpolated as a
+    # quoted SQL identifier -- validate strictly to keep that safe.
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", channel):
         return send_json(400, {"error": "channel must be a SQL identifier"},
                          handler="postgres")
@@ -72,14 +83,16 @@ def handle_listen(channel: str) -> None:
     try:
         conn.execute(f'LISTEN "{channel}"')
         send_sse_headers(handler="postgres")
-        sse_comment(f"LISTEN {channel} (try: select pg_notify('{channel}','hi'))")
+        sse_comment(f"LISTEN {channel} "
+                    f"(try: curl -X POST http://$INTERCEPT_HOST/stream/{channel} "
+                    f"-d 'hi')")
         try:
             while True:
                 gen = conn.notifies(timeout=1.0, stop_after=None)
                 got_any = False
                 for n in gen:
                     got_any = True
-                    sse_event({"channel": n.channel, "payload": n.payload, "pid": n.pid})
+                    sse_event({"name": n.channel, "payload": n.payload, "pid": n.pid})
                 if not got_any:
                     sse_comment("idle")
         except (BrokenPipeError, OSError):
@@ -89,6 +102,17 @@ def handle_listen(channel: str) -> None:
             conn.close()
         except Exception:
             pass
+
+
+def handle_notify(channel: str, payload: bytes) -> None:
+    """pg_notify is a function -- both args bind safely with no quoting."""
+    import psycopg
+    cfg = load_backend(HOST)
+    text = payload.decode("utf-8", "replace")
+    with psycopg.connect(cfg["dsn"], autocommit=True) as conn:
+        conn.execute("SELECT pg_notify(%s, %s)", (channel, text))
+    send_json(200, {"name": channel, "sent": True, "bytes": len(payload)},
+              handler="postgres")
 
 
 def route(method: str, path: str, headers: dict, body: bytes) -> None:
@@ -104,9 +128,20 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
         return send_json(200, {**_INFO, "host": HOST, "backend": backend},
                          handler="postgres")
 
-    m = re.fullmatch(r"/listen/([^/]+)", p)
+    m = re.fullmatch(r"/stream/([^/]+)/tail", p)
     if m and method == "GET":
-        return handle_listen(m.group(1))
+        return handle_tail(m.group(1))
+
+    m = re.fullmatch(r"/stream/([^/]+)", p)
+    if m and method == "POST":
+        return handle_notify(m.group(1), body)
+
+    if re.fullmatch(r"/stream(/[^/]+)?(/peek)?", p) or \
+       re.fullmatch(r"/streams", p):
+        return send_json(501, {
+            "error": "postgres: only POST /stream/{ch} (NOTIFY) and "
+                     "GET /stream/{ch}/tail (LISTEN) are supported"},
+            handler="postgres")
 
     if method == "GET" and p == "/tables":
         return run_query(

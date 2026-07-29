@@ -45,9 +45,9 @@ def main() -> None:
     q = urllib.parse.quote("select now()::text, version()")
     print(get(f"http://mylocal.postgres/query?sql={q}"))
 
-    section("redis: set + get")
-    post("http://mylocal.redis/key/from-python", "hello from python")
-    print(get("http://mylocal.redis/key/from-python"))
+    section("redis: kv set + get")
+    post("http://mylocal.redis/kv/from-python", "hello from python")
+    print(get("http://mylocal.redis/kv/from-python"))
 
     section("mongo: insert + find")
     post("http://mylocal.mongo/db/demo/coll/python_users",
@@ -55,13 +55,13 @@ def main() -> None:
          ct="application/json")
     print(get("http://mylocal.mongo/db/demo/coll/python_users?filter=%7B%7D"))
 
-    section("kafka: produce + peek")
-    post("http://mylocal.kafka/topic/pydemo/records", "py-key|hello-from-python")
-    print(get("http://mylocal.kafka/topic/pydemo/records?limit=5"))
+    section("kafka: stream produce + peek")
+    post("http://mylocal.kafka/stream/pydemo?key=py-key", "hello-from-python")
+    print(get("http://mylocal.kafka/stream/pydemo/peek?limit=5"))
 
-    section("rabbit: publish + get")
-    post("http://mylocal.rabbit/queue/pydemo/publish", "hello from python")
-    print(get("http://mylocal.rabbit/queue/pydemo/get"))
+    section("rabbit: stream publish + peek")
+    post("http://mylocal.rabbit/stream/pydemo", "hello from python")
+    print(get("http://mylocal.rabbit/stream/pydemo/peek?limit=1"))
 
     section("smtp")
     print(post("http://mylocal.smtp/send",

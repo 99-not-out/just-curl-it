@@ -15,7 +15,7 @@ edits, no `sudo`, no port-80 fights. Exit the shell and it's all gone.
 ```sh
 jci use demos
 curl http://mylocal.postgres/query?sql=select+now\(\)
-curl http://mylocal.redis/key/foo --data-binary 'hello' -X PUT
+curl http://mylocal.redis/kv/foo --data-binary 'hello' -X PUT
 ```
 
 ## But why?
@@ -78,6 +78,40 @@ brew install zsh curl
 `jci use` auto-detects brew curl and prepends it to `PATH` inside the
 activated shell, so plain `curl` works.
 
+## Inside the env
+
+`jci use` sources `lib/helpers.sh` into the activated shell, which adds:
+
+| helper | what it does |
+|---|---|
+| `jci-routes` | print the active env's route table, columns aligned |
+| `jci-info` | fetch `/_info` from every route — the URL menu for an unfamiliar env |
+| `jci-run '<cmd>'` | run `<cmd>` with the shim re-established (see below) |
+
+`jci doctor` reports whether the helpers are installed.
+
+**When you need `jci-run`.** In the interactive shell, plain `curl` just works.
+But macOS SIP strips `DYLD_*` from any `/usr/bin/*` binary — including
+`/usr/bin/env`, which is what `#!/usr/bin/env bash` runs. So a *script* you
+launch from inside the env loses the shim before its first line executes, and
+its `curl`s fail to resolve `mylocal.*`. Wrap them:
+
+```sh
+#!/usr/bin/env bash
+. "$JCI_HELPERS"                       # exported by `jci use`
+jci-run 'curl -s http://mylocal.shim/routes | jq'
+```
+
+This is macOS-only — Linux `LD_PRELOAD` survives `exec` — but `jci-run` is a
+no-op cost on Linux, so scripts meant to be portable can just use it.
+`demos/scripts/tour.sh` does exactly this. For the record, `jci use` also
+exports `JCI_LIB`, `JCI_PRELOAD_VAR` and `JCI_SHELL`, so you can re-establish
+the shim by hand:
+
+```sh
+env "$JCI_PRELOAD_VAR=$JCI_LIB" "$JCI_SHELL" -c 'curl -s http://mylocal.hello/'
+```
+
 ## Routes
 
 A route line is `<hostname>  [<METHODS>]  <handler-cmd>` — methods optional,
@@ -129,6 +163,19 @@ trust) handles secrets at rest. The proxy is stdlib-only Python.
 in that shell that hits `gh.api` goes through the proxy — `curl`, `gh`,
 `git` over HTTP, Python `requests`, etc. That's the point, but it's worth
 knowing.
+
+## Streaming
+
+Handlers can stream — the shim doesn't bound their lifetime once the
+client connects. `demos/handlers/shim.py` ships SSE primitives
+(`send_sse_headers`, `sse_event`, `sse_comment`), and the demos use them:
+
+- `GET /stream/<n>/tail` — uniform across Kafka, Postgres LISTEN, Redis
+  pubsub, RabbitMQ. (See each handler's `/_info` for backend specifics.)
+
+The only timeout the shim imposes is the *initial* accept window (default
+30s, between handler spawn and the caller's `connect()`). Override with
+`INTERCEPT_ACCEPT_TIMEOUT=<seconds>` — `0` disables it entirely.
 
 ## How it works
 
