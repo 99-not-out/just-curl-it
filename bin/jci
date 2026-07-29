@@ -95,6 +95,16 @@ cmd_use() {
     export JCI_HANDLERS="$HANDLERS_DIR"
     export JCI_ENV="$env_name"
 
+    # SIP strips DYLD_* from any /usr/bin/* binary exec'd downstream
+    # (notably /usr/bin/env in script shebangs). Mirror the value into
+    # non-DYLD-prefixed vars so scripts inside the env can re-establish it
+    # via the jci-run helper (or directly: `env "$JCI_PRELOAD_VAR=$JCI_LIB"
+    # "$JCI_SHELL" -c '...'`).
+    export JCI_LIB="$lib"
+    export JCI_PRELOAD_VAR="$var"
+    export JCI_SHELL="$sh"
+    export JCI_HELPERS="$JCI_HOME/lib/helpers.sh"
+
     # On macOS, prepend brew curl's keg-only bin dir to PATH so plain `curl`
     # resolves to a non-SIP binary that honors DYLD_INSERT_LIBRARIES.
     local curl_dir; curl_dir=$(find_curl_dir)
@@ -121,6 +131,7 @@ cmd_use() {
 [ -f "$user_zdotdir/.zshenv" ] && . "$user_zdotdir/.zshenv"
 [ -f "$user_zdotdir/.zshrc" ]  && . "$user_zdotdir/.zshrc"
 unset ZDOTDIR
+[ -f "$JCI_HELPERS" ] && . "$JCI_HELPERS"
 PROMPT="%F{cyan}${tag}%f \${PROMPT}"
 trap 'rm -rf "$tmpdir"' EXIT
 EOF
@@ -131,6 +142,7 @@ EOF
             local rcfile="$tmpdir/bashrc"
             cat > "$rcfile" <<EOF
 [ -f "\$HOME/.bashrc" ] && . "\$HOME/.bashrc"
+[ -f "$JCI_HELPERS" ] && . "$JCI_HELPERS"
 PS1="\\[\\033[36m\\]${tag}\\[\\033[0m\\] \${PS1}"
 trap 'rm -rf "$tmpdir"' EXIT
 EOF
@@ -153,6 +165,9 @@ cmd_doctor() {
     else                   echo "shim:      MISSING ($lib) -- run 'make install'"; fi
     if [ -n "$sh" ]; then  echo "shell:     $sh"
     else                   echo "shell:     MISSING -- see 'jci use' for setup"; fi
+    if [ -f "$JCI_HOME/lib/helpers.sh" ]; then
+                           echo "helpers:   $JCI_HOME/lib/helpers.sh"
+    else                   echo "helpers:   MISSING -- run 'make install' (jci-run/jci-info unavailable)"; fi
 
     if [ "$(platform)" = "Darwin" ]; then
         local curl_dir; curl_dir=$(find_curl_dir)

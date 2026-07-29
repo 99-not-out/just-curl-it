@@ -78,6 +78,40 @@ brew install zsh curl
 `jci use` auto-detects brew curl and prepends it to `PATH` inside the
 activated shell, so plain `curl` works.
 
+## Inside the env
+
+`jci use` sources `lib/helpers.sh` into the activated shell, which adds:
+
+| helper | what it does |
+|---|---|
+| `jci-routes` | print the active env's route table, columns aligned |
+| `jci-info` | fetch `/_info` from every route — the URL menu for an unfamiliar env |
+| `jci-run '<cmd>'` | run `<cmd>` with the shim re-established (see below) |
+
+`jci doctor` reports whether the helpers are installed.
+
+**When you need `jci-run`.** In the interactive shell, plain `curl` just works.
+But macOS SIP strips `DYLD_*` from any `/usr/bin/*` binary — including
+`/usr/bin/env`, which is what `#!/usr/bin/env bash` runs. So a *script* you
+launch from inside the env loses the shim before its first line executes, and
+its `curl`s fail to resolve `mylocal.*`. Wrap them:
+
+```sh
+#!/usr/bin/env bash
+. "$JCI_HELPERS"                       # exported by `jci use`
+jci-run 'curl -s http://mylocal.shim/routes | jq'
+```
+
+This is macOS-only — Linux `LD_PRELOAD` survives `exec` — but `jci-run` is a
+no-op cost on Linux, so scripts meant to be portable can just use it.
+`demos/scripts/tour.sh` does exactly this. For the record, `jci use` also
+exports `JCI_LIB`, `JCI_PRELOAD_VAR` and `JCI_SHELL`, so you can re-establish
+the shim by hand:
+
+```sh
+env "$JCI_PRELOAD_VAR=$JCI_LIB" "$JCI_SHELL" -c 'curl -s http://mylocal.hello/'
+```
+
 ## Routes
 
 A route line is `<hostname>  [<METHODS>]  <handler-cmd>` — methods optional,

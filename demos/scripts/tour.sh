@@ -5,6 +5,18 @@ set -u
 
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
+if [ -z "${JCI_ENV-}" ]; then
+    echo "this script expects to run inside 'jci use demos'." >&2
+    exit 1
+fi
+if [ -z "${JCI_HELPERS-}" ] || [ ! -f "$JCI_HELPERS" ]; then
+    echo "jci helpers not found at \$JCI_HELPERS=$JCI_HELPERS." >&2
+    echo "run 'make install' to pick up the latest jci, then 'jci use demos' again." >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$JCI_HELPERS"
+
 step()  {
     printf '\n'
     green "▸ $1"
@@ -14,14 +26,11 @@ step()  {
         read -r -p "  [enter to run, s to skip, q to quit] " a
         case "$a" in q|Q) exit 0 ;; s|S) return ;; esac
     fi
-    bash -c "$3"
+    # `#!/usr/bin/env bash` strips DYLD_* on macOS via SIP -- jci-run
+    # re-establishes it into the brewed shell jci picked.
+    jci-run "$3"
     printf '\n'
 }
-
-if [ -z "${JCI_ENV-}" ]; then
-    echo "this script expects to run inside 'jci use demos'." >&2
-    exit 1
-fi
 
 step "shim meta" "the shim introspects its own route table" \
      "curl -s http://mylocal.shim/routes | jq"

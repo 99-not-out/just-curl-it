@@ -4,6 +4,8 @@
 #   - routes.conf parsing (comments, methods detection, handler with spaces)
 #   - end-to-end interception (curl -> sentinel IP -> spawned handler)
 #   - method permissions (GET-only denies POST/DELETE; Allow header)
+#   - SSE responses stream progressively instead of buffering to handler exit
+#   - jci-run restores the shim in scripts whose shebang lost it to SIP
 #   - auth proxy header injection (against httpbin.org if reachable)
 #   - AF_INET6 with v4-mapped destinations (the Java HttpClient case)
 #   - Python unit tests for enforce_methods in proxy.py and shim.py
@@ -150,6 +152,65 @@ SPLIT_OK=$(awk -v s="${START:-0}" -v t="${TOTAL:-0}" \
     || bad "sse: response not streamed" "timing: $TIMING"
 
 # ---------------------------------------------------------------------------
+section "helpers (jci-run)"
+
+# Pick a shell the OS will let the preload var through -- same reasoning as
+# bin/jci's pick_shell (SIP strips DYLD_* from /bin/zsh and /bin/bash).
+HELPER_SHELL=""
+case "$(uname -s)" in
+    Darwin)
+        for s in /opt/homebrew/bin/zsh /usr/local/bin/zsh \
+                 /opt/homebrew/bin/bash /usr/local/bin/bash; do
+            [ -x "$s" ] && { HELPER_SHELL="$s"; break; }
+        done
+        ;;
+    Linux) HELPER_SHELL=$(command -v bash) ;;
+esac
+
+if [ -z "$HELPER_SHELL" ]; then
+    printf '  \033[33m~\033[0m no non-SIP shell found, skipping helper tests\n'
+else
+    cat > "$TMPDIR/helpers.conf" <<EOF
+test.helper  $REPO/handlers/hello.sh
+EOF
+
+    # The script under test has the `#!/usr/bin/env bash` shebang that makes
+    # macOS strip DYLD_* before its first line runs -- exactly the case
+    # jci-run exists for. A bare curl here would fail to resolve test.helper.
+    cat > "$TMPDIR/inner.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+. "$JCI_HELPERS"
+jci-run "'$CURL' -s http://test.helper/"
+EOS
+    chmod +x "$TMPDIR/inner.sh"
+
+    helper_env=(env
+        INTERCEPT_CONFIG="$TMPDIR/helpers.conf"
+        JCI_HANDLERS="$REPO/handlers"
+        JCI_ENV=test
+        JCI_LIB="$DYLIB"
+        JCI_PRELOAD_VAR="$PRELOAD_VAR"
+        JCI_SHELL="$HELPER_SHELL"
+        JCI_HELPERS="$REPO/lib/helpers.sh"
+        CURL="$CURL")
+
+    OUT=$("${helper_env[@]}" "$TMPDIR/inner.sh" 2>&1)
+    assert_match "jci-run restores the shim in a SIP-stripped script" \
+                 '"handler":"hello.sh"' "$OUT"
+
+    OUT=$("${helper_env[@]}" "$HELPER_SHELL" -c \
+          '. "$JCI_HELPERS"; jci-routes')
+    assert_match "jci-routes lists the active route" "test.helper" "$OUT"
+
+    # No env -> clear error, not a cryptic `env: : No such file`.
+    OUT=$(env -u JCI_LIB -u JCI_PRELOAD_VAR -u JCI_SHELL \
+          JCI_HELPERS="$REPO/lib/helpers.sh" "$HELPER_SHELL" -c \
+          '. "$JCI_HELPERS"; jci-run "true"' 2>&1)
+    assert_match "jci-run outside an env explains itself" "not inside an activated env" "$OUT"
+fi
+
+# ---------------------------------------------------------------------------
 section "ipv6 v4-mapped (the Java HttpClient case)"
 
 cat > "$TMPDIR/v6probe.c" <<'C'
@@ -196,7 +257,19 @@ fi
 # ---------------------------------------------------------------------------
 section "auth proxy"
 
-if "$CURL" -s -o /dev/null --max-time 5 https://httpbin.org/get; then
+# httpbin.org is flaky enough that a single probe misreports "reachable" and
+# then the real request below times out, failing the suite for network reasons.
+# Require two clean 200s before trusting it; otherwise skip.
+hb_reachable() {
+    local i code
+    for i in 1 2; do
+        code=$("$CURL" -s -o /dev/null -w '%{http_code}' --max-time 10 \
+               https://httpbin.org/get 2>/dev/null)
+        [ "$code" = "200" ] || return 1
+    done
+}
+
+if hb_reachable; then
     cat > "$TMPDIR/proxy_routes.conf"   <<EOF
 test.hb  $REPO/handlers/proxy.py
 EOF
@@ -215,7 +288,7 @@ EOF
     assert_match "Authorization injected" "Bearer test-jci-suite" "$RESP"
     assert_match "extra header injected"  "present"               "$RESP"
 else
-    printf '  \033[33m~\033[0m httpbin.org unreachable, skipping auth proxy test\n'
+    printf '  \033[33m~\033[0m httpbin.org unreachable/flaky, skipping auth proxy test\n'
 fi
 
 # ---------------------------------------------------------------------------
