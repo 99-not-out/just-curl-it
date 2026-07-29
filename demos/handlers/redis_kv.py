@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """HTTP -> Redis adapter spawned per intercepted request.
 
-Routes:
-  GET    /info                       INFO server
-  GET    /keys?pattern=*             KEYS
-  GET    /key/{k}                    GET   (404 if missing)
-  PUT    /key/{k}                    SET   body = value, optional ?ex=<seconds>
-  POST   /key/{k}                    SET   (same as PUT)
-  DELETE /key/{k}                    DEL
-  POST   /publish/{channel}          PUBLISH  body = message
+Implements both unified shapes:
+
+  kv shape (Redis keys):
+    GET    /keys?prefix=X            KEYS X*  (or ?pattern=glob for raw)
+    GET    /kv/<k>                   GET; 404 if missing
+    PUT    /kv/<k>                   SET; body = value; ?ex=<seconds>
+    POST   /kv/<k>                   same as PUT
+    DELETE /kv/<k>                   DEL
+
+  stream shape (Redis pubsub channels):
+    GET    /streams                  PUBSUB CHANNELS *
+    POST   /stream/<ch>              PUBLISH; body = message
+    GET    /stream/<ch>/tail         SUBSCRIBE (SSE)
+    /stream/<ch>/peek and DELETE     -> 501 (pubsub has no replay/drop)
 """
 from __future__ import annotations
 
@@ -25,16 +31,17 @@ HOST = os.environ.get("INTERCEPT_HOST", "")
 
 _INFO = {
     "handler": "redis",
+    "shape": ["kv", "stream"],
     "routes": [
         "GET    /_info",
-        "GET    /info",
-        "GET    /keys?pattern=*",
-        "GET    /key/{k}",
-        "PUT    /key/{k}      (body = value, ?ex=<seconds>)",
-        "POST   /key/{k}      (same as PUT)",
-        "DELETE /key/{k}",
-        "POST   /publish/{channel}   (body = message)",
-        "GET    /subscribe/{channel} (SSE stream)",
+        "GET    /keys?prefix=X       (or ?pattern=glob)",
+        "GET    /kv/{k}",
+        "PUT    /kv/{k}              (body = value, ?ex=<seconds>)",
+        "POST   /kv/{k}              (same as PUT)",
+        "DELETE /kv/{k}",
+        "GET    /streams             (PUBSUB CHANNELS *)",
+        "POST   /stream/{ch}         (PUBLISH; body = message)",
+        "GET    /stream/{ch}/tail    (SUBSCRIBE; SSE stream)",
     ],
 }
 
@@ -63,43 +70,21 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
 
     r = client()
 
-    if method == "GET" and p == "/info":
-        return send_json(200, r.info(), handler="redis")
-
-    m = re.fullmatch(r"/subscribe/([^/]+)", p)
-    if m and method == "GET":
-        ch = m.group(1)
-        ps = r.pubsub()
-        ps.subscribe(ch)
-        send_sse_headers(handler="redis")
-        sse_comment(f"subscribed to {ch}")
-        try:
-            for msg in ps.listen():
-                if msg.get("type") != "message":
-                    continue
-                data = msg["data"]
-                if isinstance(data, (bytes, bytearray)):
-                    try:
-                        data = data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        data = data.decode("utf-8", "replace")
-                sse_event({"channel": ch, "data": data})
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
-            try:
-                ps.close()
-            except Exception:
-                pass
-        return
+    # ---- kv shape ----------------------------------------------------------
 
     if method == "GET" and p == "/keys":
-        pattern = qs.get("pattern", ["*"])[0]
+        # ?prefix=foo  -> glob "foo*"; ?pattern=raw passes through.
+        if "pattern" in qs:
+            pattern = qs["pattern"][0]
+        elif "prefix" in qs:
+            pattern = qs["prefix"][0] + "*"
+        else:
+            pattern = "*"
         keys = [k.decode("utf-8", "replace") for k in r.keys(pattern)]
         return send_json(200, {"pattern": pattern, "count": len(keys), "keys": keys},
                          handler="redis")
 
-    m = re.fullmatch(r"/key/(.+)", p)
+    m = re.fullmatch(r"/kv/(.+)", p)
     if m:
         key = m.group(1)
         if method == "GET":
@@ -120,11 +105,51 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
             n = r.delete(key)
             return send_json(200, {"key": key, "deleted": int(n)}, handler="redis")
 
-    m = re.fullmatch(r"/publish/([^/]+)", p)
+    # ---- stream shape (pubsub) --------------------------------------------
+
+    if method == "GET" and p == "/streams":
+        chans = [c.decode("utf-8", "replace") for c in r.pubsub_channels()]
+        return send_json(200, {"streams": chans, "count": len(chans)},
+                         handler="redis")
+
+    m = re.fullmatch(r"/stream/([^/]+)", p)
     if m and method == "POST":
         ch = m.group(1)
         n = r.publish(ch, body)
-        return send_json(200, {"channel": ch, "receivers": int(n)}, handler="redis")
+        return send_json(200, {"name": ch, "receivers": int(n)}, handler="redis")
+
+    m = re.fullmatch(r"/stream/([^/]+)/peek", p)
+    if m:
+        return send_json(501, {
+            "error": "redis: peek not supported (pubsub has no replay)"},
+            handler="redis")
+
+    m = re.fullmatch(r"/stream/([^/]+)/tail", p)
+    if m and method == "GET":
+        ch = m.group(1)
+        ps = r.pubsub()
+        ps.subscribe(ch)
+        send_sse_headers(handler="redis")
+        sse_comment(f"subscribed to {ch}")
+        try:
+            for msg in ps.listen():
+                if msg.get("type") != "message":
+                    continue
+                data = msg["data"]
+                if isinstance(data, (bytes, bytearray)):
+                    try:
+                        data = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        data = data.decode("utf-8", "replace")
+                sse_event({"name": ch, "data": data})
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                ps.close()
+            except Exception:
+                pass
+        return
 
     send_json(404, {"error": f"no route for {method} {p}"}, handler="redis")
 

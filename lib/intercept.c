@@ -38,8 +38,8 @@
 #include <dlfcn.h>
 #endif
 
-#define MAX_ROUTES        64
-#define HANDLER_TIMEOUT   30   /* seconds the handler waits on accept() */
+#define MAX_ROUTES                64
+#define ACCEPT_TIMEOUT_DEFAULT    30   /* seconds the handler waits on accept() */
 
 #define CONFIG_PATH_DEFAULT "/etc/intercept/routes.conf"
 
@@ -266,8 +266,18 @@ static int spawn_handler_and_connect(int sockfd, struct route *r,
 
         /* Bound the wait so a caller that dies between listen() and connect()
          * can't leave us blocked forever in accept(). SIGALRM defaults to
-         * killing the process, which is exactly what we want. */
-        alarm(HANDLER_TIMEOUT);
+         * killing the process, which is exactly what we want.
+         *
+         * Override with INTERCEPT_ACCEPT_TIMEOUT=<seconds>; 0 disables it.
+         * Bounds the *connect* wait only -- the handler itself runs unbounded
+         * once the caller is attached, so streaming responses are fine. */
+        int accept_timeout = ACCEPT_TIMEOUT_DEFAULT;
+        const char *to = getenv("INTERCEPT_ACCEPT_TIMEOUT");
+        if (to && *to) {
+            int n = atoi(to);
+            if (n >= 0) accept_timeout = n;
+        }
+        alarm(accept_timeout);  /* alarm(0) cancels any pending alarm */
 
         int conn = accept(listen_fd, NULL, NULL);
         close(listen_fd);

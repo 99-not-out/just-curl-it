@@ -32,17 +32,17 @@ step "hello" "tiny bash handler -- proves the pipe is wired up" \
 step "postgres" "plain SQL via HTTP" \
      "curl -sG http://mylocal.postgres/query --data-urlencode 'sql=select now(), version()' | jq"
 
-step "redis set/get" "curl as a redis client" \
-     "curl -s -X PUT http://mylocal.redis/key/greeting --data-binary 'hello from curl'; echo; curl -s http://mylocal.redis/key/greeting; echo"
+step "redis kv set/get" "kv shape -- /kv/{key}" \
+     "curl -s -X PUT http://mylocal.redis/kv/greeting --data-binary 'hello from curl'; echo; curl -s http://mylocal.redis/kv/greeting; echo"
 
 step "mongo" "insert then find" \
      "curl -s -X POST http://mylocal.mongo/db/demo/coll/users -H 'content-type: application/json' -d '{\"name\":\"ada\",\"age\":30}' | jq; curl -sG 'http://mylocal.mongo/db/demo/coll/users' --data-urlencode 'filter={}' | jq"
 
-step "kafka produce/peek" "produce 3 records, read them back" \
-     "curl -s -X POST http://mylocal.kafka/topic/demo/records -d $'k1|one\nk2|two\nk3|three' | jq; curl -s 'http://mylocal.kafka/topic/demo/records?limit=10' | jq"
+step "kafka produce/peek" "stream shape -- POST one msg, GET /peek" \
+     "curl -s -X POST 'http://mylocal.kafka/stream/demo?key=k1' -d 'one' | jq; curl -s -X POST 'http://mylocal.kafka/stream/demo?key=k2' -d 'two' | jq; curl -s 'http://mylocal.kafka/stream/demo/peek?limit=10' | jq"
 
-step "rabbit" "publish then get" \
-     "curl -s -X POST http://mylocal.rabbit/queue/demo/publish -d 'hi from curl' | jq; curl -s http://mylocal.rabbit/queue/demo/get | jq"
+step "rabbit" "stream shape -- POST then peek" \
+     "curl -s -X POST http://mylocal.rabbit/stream/demo -d 'hi from curl' | jq; curl -s 'http://mylocal.rabbit/stream/demo/peek?limit=1' | jq"
 
 step "smtp" "send mail (open http://localhost:8025 for the mailhog UI)" \
      "curl -s -X POST http://mylocal.smtp/send -H 'content-type: application/json' -d '{\"to\":\"you@example.com\",\"subject\":\"hi\",\"body\":\"sent with curl\"}' | jq"
@@ -51,6 +51,6 @@ step "grpc" "curl speaks protobuf/HTTP2 under the hood" \
      "curl -s http://mylocal.grpc/_services | jq; curl -s -X POST http://mylocal.grpc/helloworld.Greeter/SayHello -d '{\"name\":\"matt\"}' | jq"
 
 step "cross-backend pipeline" "stash postgres output straight into redis with jq + curl" \
-     "curl -s 'http://mylocal.postgres/query?sql=select+now()' | jq -r '.rows[0][0]' | curl -s -X PUT http://mylocal.redis/key/last_pg_time --data-binary @-; echo; curl -s http://mylocal.redis/key/last_pg_time; echo"
+     "curl -s 'http://mylocal.postgres/query?sql=select+now()' | jq -r '.rows[0][0]' | curl -s -X PUT http://mylocal.redis/kv/last_pg_time --data-binary @-; echo; curl -s http://mylocal.redis/kv/last_pg_time; echo"
 
 green "done!  now try:  python3 demos/apps/python/demo.py   or   java demos/apps/java/Main.java"

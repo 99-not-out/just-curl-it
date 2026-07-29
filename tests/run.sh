@@ -120,6 +120,36 @@ ALLOW=$(env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/perms.conf" \
 assert_match "Allow header present on 405" "Allow: GET" "$ALLOW"
 
 # ---------------------------------------------------------------------------
+section "sse streaming"
+
+# Self-contained SSE handler that emits 5 events at 0.5s intervals. If the
+# shim or anything else buffers the response, all 5 arrive in a single burst
+# at handler exit -- which we detect by comparing curl's time_starttransfer
+# (first byte) to time_total. Streamed: gap is large. Buffered: gap ~= 0.
+PY=${PY:-python3}
+cat > "$TMPDIR/sse_routes.conf" <<EOF
+test.clock  $PY $REPO/tests/sse_clock.py
+EOF
+
+TIMING=$(env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/sse_routes.conf" \
+    JCI_HANDLERS="$REPO/handlers" \
+    "$CURL" -sN --max-time 4 -o "$TMPDIR/sse.out" \
+    -w 'start=%{time_starttransfer} total=%{time_total}' \
+    http://test.clock/ 2>&1)
+
+EVENTS=$(grep -c '^data:' "$TMPDIR/sse.out" 2>/dev/null || echo 0)
+[ "$EVENTS" -ge 3 ] && ok "sse: streamed $EVENTS event(s)" \
+    || bad "sse: only $EVENTS event(s) received" "$(head -c 200 "$TMPDIR/sse.out")"
+
+START=$(echo "$TIMING" | grep -oE 'start=[0-9.]+' | cut -d= -f2)
+TOTAL=$(echo "$TIMING" | grep -oE 'total=[0-9.]+' | cut -d= -f2)
+SPLIT_OK=$(awk -v s="${START:-0}" -v t="${TOTAL:-0}" \
+    'BEGIN { print (t - s > 0.8) ? "yes" : "no" }')
+[ "$SPLIT_OK" = "yes" ] \
+    && ok "sse: bytes arrived progressively (total - start_transfer > 0.8s)" \
+    || bad "sse: response not streamed" "timing: $TIMING"
+
+# ---------------------------------------------------------------------------
 section "ipv6 v4-mapped (the Java HttpClient case)"
 
 cat > "$TMPDIR/v6probe.c" <<'C'

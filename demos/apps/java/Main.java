@@ -27,24 +27,24 @@ public class Main {
         section("postgres");
         get("http://mylocal.postgres/query?sql=select%20now()%3A%3Atext%2C%20version()");
 
-        section("redis: set + get");
-        post("http://mylocal.redis/key/from-java", "hello from java", "text/plain");
-        get("http://mylocal.redis/key/from-java");
+        section("redis: kv set + get");
+        post("http://mylocal.redis/kv/from-java", "hello from java", "text/plain");
+        get("http://mylocal.redis/kv/from-java");
 
         section("mongo: insert + find");
         post("http://mylocal.mongo/db/demo/coll/java_users",
              "{\"name\":\"bob\",\"lang\":\"java\"}", "application/json");
         get("http://mylocal.mongo/db/demo/coll/java_users?filter=%7B%7D");
 
-        section("kafka: produce + peek");
-        post("http://mylocal.kafka/topic/javademo/records",
-             "java-key|hello-from-java", "text/plain");
-        get("http://mylocal.kafka/topic/javademo/records?limit=5");
+        section("kafka: stream produce + peek");
+        post("http://mylocal.kafka/stream/javademo?key=java-key",
+             "hello-from-java", "text/plain");
+        get("http://mylocal.kafka/stream/javademo/peek?limit=5");
 
-        section("rabbit: publish + get");
-        post("http://mylocal.rabbit/queue/javademo/publish",
+        section("rabbit: stream publish + peek");
+        post("http://mylocal.rabbit/stream/javademo",
              "hello from java", "text/plain");
-        get("http://mylocal.rabbit/queue/javademo/get");
+        get("http://mylocal.rabbit/stream/javademo/peek?limit=1");
 
         section("smtp");
         post("http://mylocal.smtp/send",

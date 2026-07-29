@@ -15,7 +15,7 @@ edits, no `sudo`, no port-80 fights. Exit the shell and it's all gone.
 ```sh
 jci use demos
 curl http://mylocal.postgres/query?sql=select+now\(\)
-curl http://mylocal.redis/key/foo --data-binary 'hello' -X PUT
+curl http://mylocal.redis/kv/foo --data-binary 'hello' -X PUT
 ```
 
 ## But why?
@@ -129,6 +129,19 @@ trust) handles secrets at rest. The proxy is stdlib-only Python.
 in that shell that hits `gh.api` goes through the proxy — `curl`, `gh`,
 `git` over HTTP, Python `requests`, etc. That's the point, but it's worth
 knowing.
+
+## Streaming
+
+Handlers can stream — the shim doesn't bound their lifetime once the
+client connects. `demos/handlers/shim.py` ships SSE primitives
+(`send_sse_headers`, `sse_event`, `sse_comment`), and the demos use them:
+
+- `GET /stream/<n>/tail` — uniform across Kafka, Postgres LISTEN, Redis
+  pubsub, RabbitMQ. (See each handler's `/_info` for backend specifics.)
+
+The only timeout the shim imposes is the *initial* accept window (default
+30s, between handler spawn and the caller's `connect()`). Override with
+`INTERCEPT_ACCEPT_TIMEOUT=<seconds>` — `0` disables it entirely.
 
 ## How it works
 

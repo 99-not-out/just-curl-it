@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """HTTP -> Kafka adapter spawned per intercepted request.
 
-Routes:
-  GET  /topics                list topics + partition counts
-  GET  /topic/<T>             partitions + leaders + replicas for T
-  GET  /topic/<T>/records     last N records across partitions (?limit=50)
-  POST /topic/<T>/records     body: one "key|value" per line (key optional)
+Implements the unified `stream` shape:
+
+  GET    /streams                     list topics
+  GET    /stream/<T>                  partitions + leaders + replicas
+  POST   /stream/<T>                  produce one message; body = value, ?key=K
+  GET    /stream/<T>/peek?limit=50    last N records across partitions
+  GET    /stream/<T>/tail?from=...    SSE stream (from=earliest|latest)
+  DELETE /stream/<T>                  -> 501 (Kafka has no destructive purge)
 """
 from __future__ import annotations
 
@@ -24,13 +27,14 @@ HOST = os.environ.get("INTERCEPT_HOST", "")
 
 _INFO = {
     "handler": "kafka",
+    "shape": "stream",
     "routes": [
-        "GET  /_info",
-        "GET  /topics",
-        "GET  /topic/{T}",
-        "GET  /topic/{T}/records?limit=50",
-        "POST /topic/{T}/records  (body: key|value per line)",
-        "GET  /topic/{T}/consume?from=latest|earliest  (SSE stream)",
+        "GET    /_info",
+        "GET    /streams",
+        "GET    /stream/{T}",
+        "POST   /stream/{T}                 (body = message; ?key=K optional)",
+        "GET    /stream/{T}/peek?limit=50",
+        "GET    /stream/{T}/tail?from=latest|earliest    (SSE stream)",
     ],
 }
 
@@ -213,35 +217,30 @@ def handle_consume(conf: dict, topic: str, start: str) -> None:
             pass
 
 
-def handle_produce(conf: dict, topic: str, body: bytes) -> None:
+def handle_produce(conf: dict, topic: str, body: bytes,
+                   key: bytes | None) -> None:
     from confluent_kafka import Producer
 
-    lines = [ln for ln in body.decode("utf-8", "replace").splitlines() if ln]
-    if not lines:
-        return send_json(400, {"error": "empty body; expected key|value per line"})
+    if not body:
+        return send_json(400, {"error": "empty body"})
 
-    results: list[dict] = []
+    result: dict = {}
 
-    def on_delivery(err, msg, _sink=results):
+    def on_delivery(err, msg):
         if err:
-            _sink.append({"error": str(err)})
+            result["error"] = str(err)
         else:
-            _sink.append({"partition": msg.partition(), "offset": msg.offset()})
+            result["partition"] = msg.partition()
+            result["offset"] = msg.offset()
 
     prod = Producer({**conf, "acks": "all"})
-    for line in lines:
-        if "|" in line:
-            k, _, v = line.partition("|")
-            k_bytes = k.encode("utf-8") if k else None
-        else:
-            k_bytes, v = None, line
-        kwargs = {"topic": topic, "value": v.encode("utf-8"), "on_delivery": on_delivery}
-        if k_bytes is not None:
-            kwargs["key"] = k_bytes
-        prod.produce(**kwargs)
+    kwargs = {"topic": topic, "value": body, "on_delivery": on_delivery}
+    if key:
+        kwargs["key"] = key
+    prod.produce(**kwargs)
     prod.flush(30)
 
-    send_json(200, {"topic": topic, "produced": len(results), "results": results})
+    send_json(200, {"topic": topic, "produced": 1, **result})
 
 
 def route(method: str, path: str, body: bytes, conf: dict) -> None:
@@ -256,23 +255,29 @@ def route(method: str, path: str, body: bytes, conf: dict) -> None:
             backend = {"error": str(e)}
         return send_json(200, {**_INFO, "host": HOST, "backend": backend})
 
-    if p == "/topics" and method == "GET":
+    if p == "/streams" and method == "GET":
         return handle_list_topics(conf)
 
-    m = re.fullmatch(r"/topic/([^/]+)", p)
-    if m and method == "GET":
-        return handle_topic_details(conf, m.group(1))
-
-    m = re.fullmatch(r"/topic/([^/]+)/records", p)
+    m = re.fullmatch(r"/stream/([^/]+)", p)
     if m:
         topic = m.group(1)
         if method == "GET":
-            limit = int(qs.get("limit", ["50"])[0])
-            return handle_peek_records(conf, topic, limit)
+            return handle_topic_details(conf, topic)
         if method == "POST":
-            return handle_produce(conf, topic, body)
+            key_str = qs.get("key", [None])[0]
+            key_bytes = key_str.encode("utf-8") if key_str else None
+            return handle_produce(conf, topic, body, key_bytes)
+        if method == "DELETE":
+            return send_json(501, {
+                "error": "kafka: DELETE /stream/{T} not supported "
+                         "(Kafka has no destructive purge primitive)"})
 
-    m = re.fullmatch(r"/topic/([^/]+)/consume", p)
+    m = re.fullmatch(r"/stream/([^/]+)/peek", p)
+    if m and method == "GET":
+        limit = int(qs.get("limit", ["50"])[0])
+        return handle_peek_records(conf, m.group(1), limit)
+
+    m = re.fullmatch(r"/stream/([^/]+)/tail", p)
     if m and method == "GET":
         start = qs.get("from", ["latest"])[0]
         if start not in ("earliest", "latest"):
