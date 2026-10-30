@@ -27,7 +27,7 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres mysql smtp kafka grpc mongo rabbit; do
+for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit; do
     echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
 done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
@@ -133,6 +133,36 @@ if install_or_skip mysql mysql; then
     assert_eq    "mysql POST drop -> 200"                  "200" "$(code "$OUT")"
     OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode 'sql=select * from nope_$$')
     assert_eq    "mysql bad SQL -> 400"                    "400" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "clickhouse"
+if install_or_skip clickhouse clickhouse; then
+    T="jci_test_$$"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode 'sql=select 1 as one')
+    assert_match "clickhouse GET select -> rows"              '"rows": [[1]]' "$(body "$OUT")"
+    assert_match "clickhouse GET select -> types"             '"types": ["UInt8"]' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode "sql=create table $T (x Int32) engine = Memory")
+    assert_eq    "clickhouse GET create -> 405 (readonly)"    "405" "$(code "$OUT")"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode "sql=select 1; create table ${T}_esc (x Int32) engine = Memory")
+    [ "$(code "$OUT")" != "200" ] && ok "clickhouse GET multi-statement refused ($(code "$OUT"))" \
+        || bad "clickhouse GET multi-statement -> 200" "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.clickhouse/query -d "create table $T (x Int32) engine = Memory")
+    assert_eq    "clickhouse POST create -> 200"              "200" "$(code "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.clickhouse/query -d "insert into $T values (7), (8)")
+    assert_eq    "clickhouse POST insert -> 200"              "200" "$(code "$OUT")"
+    assert_match "clickhouse POST insert reports written rows" '"rowCount": 2' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode "sql=insert into $T values (9)")
+    assert_eq    "clickhouse GET insert -> 405"               "405" "$(code "$OUT")"
+    OUT=$(hcurl http://mylocal.clickhouse/tables)
+    assert_match "clickhouse GET /tables lists it"            "$T" "$(body "$OUT")"
+    assert_no_match "clickhouse GET escape created nothing"   "${T}_esc" "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode "sql=select count() from $T")
+    assert_match "clickhouse GET count sees 2"                '"rows": [["2"]]' "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.clickhouse/query -d "drop table $T")
+    assert_eq    "clickhouse POST drop -> 200"                "200" "$(code "$OUT")"
+    OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode 'sql=select * from nope_$$')
+    assert_eq    "clickhouse bad SQL -> 400"                  "400" "$(code "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

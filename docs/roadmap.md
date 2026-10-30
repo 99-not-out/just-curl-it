@@ -13,7 +13,7 @@ ADR unless it changes the handler contract (noted where it might).
 |---|---|---|---|---|
 | 1 | **recipes** — `docs/recipes/`: `proxy`/`aws-sigv4` configs + example curls for GitHub, GCP (`gcloud auth print-access-token`), Azure, Vault, k8s, Prometheus, Linear, Slite, Slack, Jira; LLM pages for Anthropic, OpenAI, **Bedrock via `aws-sigv4`**, Vertex. Added `header_<name>_keychain` / `_cmd` to `proxy` so `x-api-key`-style APIs get the same secret sources | docs | — | **done** |
 | 2 | **mysql** — `query` shape; GET under `START TRANSACTION READ ONLY` *plus* an `EXPLAIN` gate (MySQL DDL implicitly commits a read-only transaction and runs), single statement | handler | pymysql | **done** |
-| 3 | **clickhouse** — `query` shape over its HTTP port; GET sets server-side `readonly=1` | handler | none | planned |
+| 3 | **clickhouse** — `query` shape over its HTTP port; GET sets server-side `readonly=1` | handler | none | **done** |
 | 4 | **graphql** — `GET /gql?query=&vars=`, `GET /schema`, `GET /types/{T}`; GET-only route refuses `mutation` documents (operation type is the protocol's own declaration — add a line to ADR 0005) | handler | none | planned |
 | 5 | **mqtt** — `stream` shape: publish, SSE tail with `+`/`#`, retained message as `GET /stream/{t}` | handler | paho-mqtt | planned |
 | 6 | **spec-aware `/_info`** — `openapi = <url>` on `proxy`; `asyncapi = <path\|url>` on stream handlers: channel menu, schema summary, example curls | feature | PyYAML for YAML specs (JSON needs none) | planned |

@@ -14,6 +14,7 @@ this directory is the backends and the examples of using them.
 | `mylocal.redis`    | `redis`     | Redis            | 6379         |
 | `mylocal.postgres` | `postgres`  | PostgreSQL       | 5433 (host)  |
 | `mylocal.mysql`    | `mysql`     | MySQL 8          | 3307 (host)  |
+| `mylocal.clickhouse` | `clickhouse` | ClickHouse (HTTP) | 8123       |
 | `mylocal.mongo`    | `mongo`     | MongoDB          | 27017        |
 | `mylocal.rabbit`   | `rabbit`    | RabbitMQ + mgmt  | 5672 / 15672 |
 | `mylocal.smtp`     | `smtp`      | SMTP (MailHog)   | 1025 / 8025  |

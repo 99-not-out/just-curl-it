@@ -36,6 +36,23 @@ services:
     # 3307 on the host so it doesn't collide with a local MySQL on 3306.
     ports: ["3307:3306"]
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: demo
+      CLICKHOUSE_PASSWORD: demo
+      CLICKHOUSE_DB: demo
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    ports: ["8123:8123"]
+
   redis:
     image: redis:7-alpine
     healthcheck:
