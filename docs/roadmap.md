@@ -11,7 +11,7 @@ ADR unless it changes the handler contract (noted where it might).
 
 | # | item | kind | deps | status |
 |---|---|---|---|---|
-| 1 | **recipes** — `docs/recipes/`: `proxy`/`aws-sigv4`/`graphql` configs + example curls for GitHub, GCP (`gcloud auth print-access-token`), Azure, Vault, k8s, Prometheus, Linear, Slite, Slack, Jira; LLM pages for Anthropic, OpenAI, **Bedrock via `aws-sigv4`** (works today), Vertex | docs | — | planned |
+| 1 | **recipes** — `docs/recipes/`: `proxy`/`aws-sigv4` configs + example curls for GitHub, GCP (`gcloud auth print-access-token`), Azure, Vault, k8s, Prometheus, Linear, Slite, Slack, Jira; LLM pages for Anthropic, OpenAI, **Bedrock via `aws-sigv4`**, Vertex. Added `header_<name>_keychain` / `_cmd` to `proxy` so `x-api-key`-style APIs get the same secret sources | docs | — | **done** |
 | 2 | **mysql** — `query` shape; GET under `SET TRANSACTION READ ONLY`, single statement | handler | pymysql | planned |
 | 3 | **clickhouse** — `query` shape over its HTTP port; GET sets server-side `readonly=1` | handler | none | planned |
 | 4 | **graphql** — `GET /gql?query=&vars=`, `GET /schema`, `GET /types/{T}`; GET-only route refuses `mutation` documents (operation type is the protocol's own declaration — add a line to ADR 0005) | handler | none | planned |

@@ -204,6 +204,22 @@ class ForwardResponse(unittest.TestCase):
         self.assertTrue(out.endswith("\r\n\r\nok"), out)
 
 
+class InjectHeaders(unittest.TestCase):
+    def test_header_cmd_and_literal(self):
+        cfg = {"header_x-api-key_cmd": "printf 'sk-from-cmd'",
+               "header_accept": "application/json"}
+        out = dict(jci.inject_headers(cfg, {"host": "ignored", "x-api-key": "client-sent"}, "up.example"))
+        self.assertEqual(out["x-api-key"], "sk-from-cmd")      # config wins over client
+        self.assertEqual(out["accept"], "application/json")
+        self.assertEqual(out["Host"], "up.example")
+        self.assertNotIn("header_x-api-key_cmd", out)
+
+    def test_header_cmd_failure_is_named(self):
+        with self.assertRaises(RuntimeError) as cm:
+            jci.inject_headers({"header_x-token_cmd": "exit 3"}, {}, "h")
+        self.assertIn("header_x-token_cmd", str(cm.exception))
+
+
 class SendError(unittest.TestCase):
     def test_body_shape_and_allow_header(self):
         patch, out = _capture()

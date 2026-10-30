@@ -150,6 +150,11 @@ names the install command, not a traceback. Handlers never load the shim
 (it's unset before they're exec'd), so the macOS SIP caveats don't apply
 to them; `python3` from anywhere works.
 
+Services that are already HTTP — GitHub, GCP, Azure, Vault, Kubernetes,
+Slack, Jira, the Anthropic and OpenAI APIs, Claude on Bedrock — need no
+handler of their own, just the right config for `proxy` or `aws-sigv4`.
+`docs/recipes/` has a page per service: two config files and three curls.
+
 Shared plumbing for Python handlers lives in `handlers/lib/jci.py`
 (request parsing including chunked bodies and `100 Continue`, responses,
 SSE, config with `${VAR}` expansion, secret redaction, upstream HTTP). A

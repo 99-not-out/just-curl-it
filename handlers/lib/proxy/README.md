@@ -28,9 +28,12 @@ authorization          = Bearer ${GITHUB_TOKEN}   # literal, ${VAR} expanded
 authorization_keychain = github-api-token          # macOS: security find-generic-password -s
 authorization_cmd      = pass show github/api      # any command printing the header value
 
-# Extra headers: any key starting header_
+# Extra headers: any key starting header_. A header can come from the same
+# three sources as authorization: literal, _keychain, or _cmd.
 header_accept               = application/vnd.github+json
 header_x-github-api-version = 2022-11-28
+header_x-api-key_keychain   = anthropic-api-key        # APIs that don't use Authorization
+header_x-vault-token_cmd    = vault print token
 
 # mTLS, for upstreams that want a client cert (Teleport app access, corp
 # gateways). A path, or a *_cmd printing a path or the PEM itself.

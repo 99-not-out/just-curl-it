@@ -297,31 +297,57 @@ def run_cmd(cmd: str, what: str) -> str:
     return out.decode().strip()
 
 
+def keychain_lookup(name: str, what: str) -> str:
+    """macOS Keychain generic password with service `name`."""
+    try:
+        out = subprocess.check_output(
+            ["security", "find-generic-password", "-s", name, "-w"],
+            stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise RuntimeError(f"{what} requires macOS security(1)")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"{what}: keychain lookup failed for {name!r}: {e.stderr.decode().strip() or e}")
+    return out.decode().strip()
+
+
+def resolve_secret(cfg: dict, key: str) -> str | None:
+    """Value for `key` from `<key>` (literal, ${VAR}-expanded), `<key>_keychain`
+    or `<key>_cmd`, in that order. None if none is configured."""
+    if key in cfg:
+        v = cfg[key].strip()
+        if "${" in v:
+            raise RuntimeError(
+                f"{key} has unexpanded ${{...}}: {v!r} "
+                f"-- the referenced env var isn't set in this shell")
+        return v
+    if f"{key}_keychain" in cfg:
+        return keychain_lookup(cfg[f"{key}_keychain"], f"{key}_keychain")
+    if f"{key}_cmd" in cfg:
+        return run_cmd(cfg[f"{key}_cmd"], f"{key}_cmd")
+    return None
+
+
 def resolve_auth(cfg: dict) -> str | None:
     """Authorization header value from `authorization`, `authorization_keychain`
     (macOS) or `authorization_cmd`, in that order."""
-    if "authorization" in cfg:
-        v = cfg["authorization"].strip()
-        if "${" in v:
-            raise RuntimeError(
-                f"authorization has unexpanded ${{...}}: {v!r} "
-                f"-- the referenced env var isn't set in this shell")
-        return v
-    if "authorization_keychain" in cfg:
-        name = cfg["authorization_keychain"]
-        try:
-            out = subprocess.check_output(
-                ["security", "find-generic-password", "-s", name, "-w"],
-                stderr=subprocess.PIPE)
-        except FileNotFoundError:
-            raise RuntimeError("authorization_keychain requires macOS security(1)")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"keychain lookup failed for {name!r}: {e.stderr.decode().strip() or e}")
-        return out.decode().strip()
-    if "authorization_cmd" in cfg:
-        return run_cmd(cfg["authorization_cmd"], "authorization_cmd")
-    return None
+    return resolve_secret(cfg, "authorization")
+
+
+def _header_names(cfg: dict) -> list[str]:
+    """Header names configured as header_<name>[_keychain|_cmd], in config order."""
+    names: list[str] = []
+    for k in cfg:
+        lk = k.lower()
+        if not lk.startswith("header_"):
+            continue
+        name = lk[len("header_"):]
+        for suffix in ("_keychain", "_cmd"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def resolve_pem(cfg: dict, key: str) -> tuple[str | None, bool]:
@@ -394,19 +420,25 @@ def connect_upstream(cfg: dict, u: urllib.parse.SplitResult) -> http.client.HTTP
 
 
 def inject_headers(cfg: dict, headers: dict[str, str], hostname: str) -> list[tuple[str, str]]:
-    """Drop hop-by-hop headers, point Host at the upstream, add auth + header_*."""
+    """Drop hop-by-hop headers, point Host at the upstream, add auth + header_*.
+
+    `header_<name>` is a literal (${VAR}-expanded); `header_<name>_keychain`
+    and `header_<name>_cmd` resolve like `authorization_*` do, so an API that
+    wants its key in `x-api-key` or `X-Vault-Token` gets the same secret
+    sources. Configured headers replace any the client sent."""
     out = [(k, v) for k, v in headers.items() if k not in HOP_BY_HOP_REQUEST]
     out.append(("Host", hostname))
     auth = resolve_auth(cfg)
     if auth:
         out = [(k, v) for k, v in out if k.lower() != "authorization"]
         out.append(("Authorization", auth))
-    for k, v in cfg.items():
-        if not k.lower().startswith("header_"):
+    lower_cfg = {k.lower(): v for k, v in cfg.items()}
+    for name in _header_names(cfg):
+        value = resolve_secret(lower_cfg, f"header_{name}")
+        if value is None:
             continue
-        name = k[len("header_"):]
-        out = [(hk, hv) for hk, hv in out if hk.lower() != name.lower()]
-        out.append((name, v))
+        out = [(hk, hv) for hk, hv in out if hk.lower() != name]
+        out.append((name, value))
     return out
 
 
