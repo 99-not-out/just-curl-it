@@ -19,7 +19,19 @@ Configured per-host via backends.conf:
     header_accept              = application/vnd.github+json
     header_x-github-api-version = 2022-11-28
 
-Stdlib only -- no venv needed.
+    # Client certificates, for an upstream that wants mTLS (Teleport app
+    # access, corp TLS gateways). Either a path or a command printing one --
+    # a command may also print the PEM itself, which never touches disk
+    # beyond a 0600 temp file unlinked once loaded.
+    client_cert     = ${TSH_APP_CERT}
+    client_key      = ${TSH_APP_KEY}
+    client_cert_cmd = tsh apps config --format=cert
+    client_key_cmd  = tsh apps config --format=key
+    ca_cert         = /path/ca.pem      # replaces the system trust store
+
+Stdlib only -- no venv needed. The helpers below (load_backend, inject_headers,
+upstream_target, connect_upstream) are importable, so a protocol handler can
+reach an authed upstream without reimplementing any of this.
 """
 from __future__ import annotations
 
@@ -29,6 +41,7 @@ import os
 import ssl
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 
 
@@ -151,53 +164,119 @@ def resolve_auth(cfg: dict) -> str | None:
                 f"{e.stderr.decode().strip() or e}")
         return out.decode().strip()
     if "authorization_cmd" in cfg:
-        cmd = cfg["authorization_cmd"]
-        try:
-            out = subprocess.check_output(
-                ["sh", "-c", cmd], stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"authorization_cmd failed: "
-                f"{e.stderr.decode().strip() or e}")
-        return out.decode().strip()
+        return run_cmd(cfg["authorization_cmd"], "authorization_cmd")
     return None
 
 
-def proxy(host: str, method: str, path: str,
-          headers: list, body: bytes) -> None:
-    cfg = load_backend(host)
+def run_cmd(cmd: str, what: str) -> str:
+    try:
+        out = subprocess.check_output(["sh", "-c", cmd], stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"{what} failed: {e.stderr.decode().strip() or e}")
+    return out.decode().strip()
+
+
+def resolve_pem(cfg: dict, key: str) -> tuple[str | None, bool]:
+    """Path to the PEM configured under `key`, plus whether we created it.
+
+    `<key>` is a path; `<key>_cmd` is a command printing either a path or the
+    PEM itself. Returns (None, False) when neither is configured.
+    """
+    if key in cfg:
+        v = cfg[key].strip()
+        if "${" in v:
+            raise RuntimeError(
+                f"{key} has unexpanded ${{...}}: {v!r} "
+                f"-- the referenced env var isn't set in this shell")
+        return v, False
+    cmd_key = f"{key}_cmd"
+    if cmd_key in cfg:
+        out = run_cmd(cfg[cmd_key], cmd_key)
+        if out.startswith("-----BEGIN"):
+            fd, path = tempfile.mkstemp(prefix="jci-", suffix=".pem")
+            with os.fdopen(fd, "w") as f:
+                f.write(out + "\n")
+            return path, True
+        return out, False
+    return None, False
+
+
+def tls_context(cfg: dict) -> ssl.SSLContext:
+    ctx = ssl.create_default_context(cafile=cfg.get("ca_cert") or None)
+    cert, cert_tmp = resolve_pem(cfg, "client_cert")
+    key, key_tmp = resolve_pem(cfg, "client_key")
+    try:
+        if bool(cert) != bool(key):
+            raise RuntimeError(
+                "client_cert and client_key must be set together "
+                f"(got client_cert={cert!r}, client_key={key!r})")
+        if cert and key:
+            for path, what in ((cert, "client_cert"), (key, "client_key")):
+                if not os.path.exists(path):
+                    raise RuntimeError(
+                        f"{what}: no such file: {path} "
+                        f"-- an expired session leaves the config pointing at nothing")
+            ctx.load_cert_chain(cert, key)
+    finally:
+        for path, is_tmp in ((cert, cert_tmp), (key, key_tmp)):
+            if is_tmp and path:
+                os.unlink(path)
+    return ctx
+
+
+def upstream_target(cfg: dict, host: str = "") -> urllib.parse.SplitResult:
     upstream = cfg.get("upstream")
     if not upstream:
-        raise RuntimeError(f"missing 'upstream' in [{host}]")
-
+        raise RuntimeError(
+            f"missing 'upstream' in [{host}]" if host
+            else "missing 'upstream' in backends.conf")
     u = urllib.parse.urlsplit(upstream)
     if u.scheme not in ("http", "https"):
         raise RuntimeError(f"unsupported upstream scheme: {u.scheme}")
+    upstream_host(u)
+    return u
 
-    out_headers = [(k, v) for (k, v) in headers
-                   if k.lower() not in HOP_BY_HOP_REQUEST]
-    out_headers.append(("Host", u.hostname))
+
+def upstream_host(u: urllib.parse.SplitResult) -> str:
+    if not u.hostname:
+        raise RuntimeError(f"upstream has no host: {u.geturl()!r}")
+    return u.hostname
+
+
+def connect_upstream(cfg: dict,
+                     u: urllib.parse.SplitResult) -> http.client.HTTPConnection:
+    if u.scheme == "https":
+        return http.client.HTTPSConnection(upstream_host(u), u.port or 443,
+                                           context=tls_context(cfg))
+    return http.client.HTTPConnection(upstream_host(u), u.port or 80)
+
+
+def inject_headers(cfg: dict, headers: list, hostname: str) -> list:
+    """Drop hop-by-hop headers, point Host at the upstream, add auth + header_*."""
+    out = [(k, v) for (k, v) in headers
+           if k.lower() not in HOP_BY_HOP_REQUEST]
+    out.append(("Host", hostname))
 
     auth = resolve_auth(cfg)
     if auth:
-        out_headers = [(k, v) for (k, v) in out_headers
-                       if k.lower() != "authorization"]
-        out_headers.append(("Authorization", auth))
+        out = [(k, v) for (k, v) in out if k.lower() != "authorization"]
+        out.append(("Authorization", auth))
 
     for k, v in cfg.items():
         if not k.lower().startswith("header_"):
             continue
         name = k[len("header_"):]
-        out_headers = [(hk, hv) for (hk, hv) in out_headers
-                       if hk.lower() != name.lower()]
-        out_headers.append((name, v))
+        out = [(hk, hv) for (hk, hv) in out if hk.lower() != name.lower()]
+        out.append((name, v))
+    return out
 
-    if u.scheme == "https":
-        conn = http.client.HTTPSConnection(
-            u.hostname, u.port or 443,
-            context=ssl.create_default_context())
-    else:
-        conn = http.client.HTTPConnection(u.hostname, u.port or 80)
+
+def proxy(host: str, method: str, path: str,
+          headers: list, body: bytes) -> None:
+    cfg = load_backend(host)
+    u = upstream_target(cfg, host)
+    out_headers = inject_headers(cfg, headers, upstream_host(u))
+    conn = connect_upstream(cfg, u)
 
     upstream_path = u.path.rstrip("/") + path
     conn.request(method, upstream_path, body=body or None,
@@ -232,8 +311,20 @@ def main() -> None:
     try:
         proxy(host, method, path, headers, body)
     except Exception as e:
-        sys.stderr.write(f"[jci-proxy] {type(e).__name__}: {e}\n")
-        write_error(502, f"{type(e).__name__}: {e}")
+        detail = f"{type(e).__name__}: {e}"
+        # Short-lived client certs (Teleport, SPIFFE, Vault) make expiry the
+        # single most common mTLS failure, and the raw alert doesn't say whose
+        # certificate it was talking about.
+        if isinstance(e, ssl.SSLError) and "EXPIRED" in str(e).upper():
+            detail += " -- renew the client certificate at its source"
+        # Python >= 3.13 verifies strictly by default; a CA that issues leaves
+        # without SKI/AKI extensions fails with this, not with anything that
+        # names the real problem.
+        elif isinstance(e, ssl.SSLError) and "KEY IDENTIFIER" in str(e).upper():
+            detail += (" -- the upstream's certificate chain lacks SKI/AKI "
+                       "extensions, which Python 3.13+ requires by default")
+        sys.stderr.write(f"[jci-proxy] {detail}\n")
+        write_error(502, detail)
 
 
 if __name__ == "__main__":

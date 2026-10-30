@@ -21,6 +21,7 @@ Every test maps to a regression that actually bit during development.
 | **helpers** | `jci-run` restores the shim inside a `#!/usr/bin/env bash` script (the SIP-stripped case); `jci-routes` lists routes; `jci-run` outside an env gives a real error |
 | **ipv6 v4-mapped** | tiny C client connects via `AF_INET6` + `::ffff:127.0.0.X` (the Java HttpClient case) — compiled at test time |
 | **auth proxy** | injects `Authorization` and `header_*` against httpbin.org; auto-skipped unless two probes return 200 (httpbin is flaky, and a network blip shouldn't redden the suite) |
+| **mtls upstream** | local TLS server with `verify_mode=CERT_REQUIRED`; asserts all three client-cert config forms (path, `_cmd` printing a path, `_cmd` printing PEM), that a missing cert fails the handshake instead of being accepted, and that cert-without-key / missing file / unexpanded `${VAR}` each name the problem. Also re-asserts header injection locally, so `inject_headers` stays covered when the httpbin section skips |
 | **python unit tests** | `proxy.py` and `shim.py` `enforce_methods`: no-restriction / `*` / in-list / not-in-list → 405 |
 
 ## Requirements
@@ -28,7 +29,8 @@ Every test maps to a regression that actually bit during development.
 - macOS: Homebrew `curl` (`brew install curl`) — system `/usr/bin/curl` is
   SIP-protected and won't load the shim.
 - Any working `cc` (clang or gcc) — used to compile the v4-mapped probe.
-- `python3` on PATH for the unit tests and the SSE clock handler.
+- `python3` on PATH for the unit tests, the SSE clock handler and the mTLS server.
+- `openssl` for the mTLS fixture's throwaway CA; the section skips without it.
 - macOS: a Homebrew `zsh` or `bash` for the helper tests (SIP strips the
   preload var from `/bin/*` shells); skipped if absent.
 - Optional: internet for the auth-proxy test (skipped if `httpbin.org` is

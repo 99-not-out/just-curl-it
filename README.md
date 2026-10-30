@@ -159,6 +159,37 @@ header_accept = application/vnd.github+json
 No bespoke encryption — the OS keychain (or whatever secret store you
 trust) handles secrets at rest. The proxy is stdlib-only Python.
 
+### Client certificates (mTLS upstreams)
+
+For an upstream that wants a client cert — Teleport app access, a corp TLS
+gateway — point `client_cert`/`client_key` at PEM files, or at a command that
+produces them. `${VAR}` expands from the shell, same as `authorization`:
+
+```ini
+[cdk.console]
+upstream        = https://console.internal.example.com
+
+client_cert     = ${TSH_APP_CERT}                 # a path
+client_key      = ${TSH_APP_KEY}
+
+# ...or a command printing a path (ephemeral certs, refreshed per request):
+client_cert_cmd = tsh apps config --format=cert
+client_key_cmd  = tsh apps config --format=key
+
+ca_cert         = /path/ca.pem     # optional; replaces the system trust store
+```
+
+A `_cmd` may print the PEM itself instead of a path, for secret stores that
+hand back material rather than files — it goes to a `0600` temp file that's
+unlinked as soon as the TLS context has loaded it. The two keys must be set
+together, and a path that doesn't exist is reported as such, since the usual
+cause is a login session that has quietly expired.
+
+Handlers can reuse all of this: `proxy.py` exposes `load_backend`,
+`upstream_target`, `connect_upstream` and `inject_headers`, so a
+protocol-specific handler reaches an authenticated upstream without
+reimplementing auth resolution or TLS setup.
+
 **Scope reminder:** once `jci use gh-api` is active, every libc-using tool
 in that shell that hits `gh.api` goes through the proxy — `curl`, `gh`,
 `git` over HTTP, Python `requests`, etc. That's the point, but it's worth

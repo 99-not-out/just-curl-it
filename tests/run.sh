@@ -292,6 +292,158 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "mtls upstream"
+
+# A local TLS server with verify_mode=CERT_REQUIRED, so a missing client cert
+# fails the handshake rather than being quietly accepted. Covers all three
+# config forms: a path, a command printing a path, and a command printing the
+# PEM itself (which proxy.py spills to a temp file and unlinks).
+MTLS_DIR="$TMPDIR/mtls"
+mkdir -p "$MTLS_DIR"
+
+gen_certs() {
+    openssl req -x509 -newkey rsa:2048 -noenc -days 1 \
+        -keyout "$MTLS_DIR/ca.key" -out "$MTLS_DIR/ca.crt" \
+        -subj "/CN=jci-test-ca" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature" \
+        >/dev/null 2>&1 || return 1
+    openssl req -newkey rsa:2048 -noenc \
+        -keyout "$MTLS_DIR/srv.key" -out "$MTLS_DIR/srv.csr" \
+        -subj "/CN=localhost" >/dev/null 2>&1 || return 1
+    # Python >= 3.13 verifies with VERIFY_X509_STRICT by default, which
+    # rejects CA-issued leaves lacking SKI/AKI ("Missing Authority Key
+    # Identifier"). `x509 -req` doesn't add them on its own.
+    printf 'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' \
+        > "$MTLS_DIR/leaf.ext"
+    { cat "$MTLS_DIR/leaf.ext"; printf 'subjectAltName=IP:127.0.0.1\n'; } \
+        > "$MTLS_DIR/srv.ext"
+    openssl x509 -req -in "$MTLS_DIR/srv.csr" -days 1 \
+        -CA "$MTLS_DIR/ca.crt" -CAkey "$MTLS_DIR/ca.key" -CAcreateserial \
+        -extfile "$MTLS_DIR/srv.ext" -out "$MTLS_DIR/srv.crt" \
+        >/dev/null 2>&1 || return 1
+    openssl req -newkey rsa:2048 -noenc \
+        -keyout "$MTLS_DIR/cli.key" -out "$MTLS_DIR/cli.csr" \
+        -subj "/CN=jci-test-client" >/dev/null 2>&1 || return 1
+    openssl x509 -req -in "$MTLS_DIR/cli.csr" -days 1 \
+        -CA "$MTLS_DIR/ca.crt" -CAkey "$MTLS_DIR/ca.key" -CAcreateserial \
+        -extfile "$MTLS_DIR/leaf.ext" -out "$MTLS_DIR/cli.crt" \
+        >/dev/null 2>&1 || return 1
+}
+
+if ! command -v openssl >/dev/null 2>&1; then
+    printf '  \033[33m~\033[0m no openssl, skipping mtls test\n'
+elif ! gen_certs; then
+    printf '  \033[33m~\033[0m cert generation failed (%s), skipping mtls test\n' \
+        "$(openssl version 2>&1 | head -1)"
+else
+    cat > "$MTLS_DIR/server.py" <<'PYEOF'
+import http.server, json, ssl, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        cert = self.connection.getpeercert()
+        cn = ""
+        for rdn in (cert or {}).get("subject", ()):
+            for k, v in rdn:
+                if k == "commonName":
+                    cn = v
+        body = json.dumps({"peer_cert": bool(cert), "cn": cn,
+                           "headers": dict(self.headers)}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+ca, crt, key = sys.argv[1:4]
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(crt, key)
+ctx.load_verify_locations(ca)
+ctx.verify_mode = ssl.CERT_REQUIRED
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+
+    mkfifo "$MTLS_DIR/port"
+    "${PY:-python3}" "$MTLS_DIR/server.py" \
+        "$MTLS_DIR/ca.crt" "$MTLS_DIR/srv.crt" "$MTLS_DIR/srv.key" \
+        > "$MTLS_DIR/port" 2>"$MTLS_DIR/server.err" &
+    MTLS_PID=$!
+    trap 'kill '"$MTLS_PID"' 2>/dev/null; rm -rf "$TMPDIR"' EXIT
+    read -r MTLS_PORT < "$MTLS_DIR/port"
+
+    if [ -z "${MTLS_PORT:-}" ]; then
+        bad "mtls server starts" "$(cat "$MTLS_DIR/server.err")"
+    else
+        ok "mtls server listening on $MTLS_PORT"
+
+        echo "test.mtls  $REPO/handlers/proxy.py" > "$MTLS_DIR/routes.conf"
+
+        # $1 = extra backends.conf lines; echoes "<body>\n<status>"
+        mtls_get() {
+            { echo "[test.mtls]"
+              echo "upstream = https://127.0.0.1:$MTLS_PORT"
+              echo "ca_cert  = $MTLS_DIR/ca.crt"
+              printf '%s\n' "$1"; } > "$MTLS_DIR/backends.conf"
+            env "$PRELOAD_VAR=$DYLIB" \
+                INTERCEPT_CONFIG="$MTLS_DIR/routes.conf" \
+                INTERCEPT_BACKENDS_CONF="$MTLS_DIR/backends.conf" \
+                JCI_HANDLERS="$REPO/handlers" \
+                "$CURL" -s --max-time 15 -w '\n%{http_code}' http://test.mtls/
+        }
+
+        # Header injection is also asserted here, not only in the auth-proxy
+        # section: that one needs httpbin.org and skips when the network is
+        # unhappy, leaving inject_headers uncovered.
+        OUT=$(mtls_get "client_cert = $MTLS_DIR/cli.crt
+client_key  = $MTLS_DIR/cli.key
+authorization     = Bearer test-mtls-suite
+header_x-jci-test = present")
+        assert_eq    "client cert path -> 200"  "200" "${OUT##*$'\n'}"
+        assert_match "server saw the peer cert" '"peer_cert": true' "${OUT%$'\n'*}"
+        assert_match "server saw the client CN" 'jci-test-client'   "${OUT%$'\n'*}"
+        assert_match "Authorization injected"   'Bearer test-mtls-suite' "${OUT%$'\n'*}"
+        assert_match "extra header injected"    '"present"'         "${OUT%$'\n'*}"
+        assert_match "Host points at upstream"  '127.0.0.1'         "${OUT%$'\n'*}"
+
+        OUT=$(mtls_get "# no client cert configured")
+        assert_eq    "no client cert -> 502"    "502" "${OUT##*$'\n'}"
+        assert_match "no client cert -> TLS error" "SSL" "${OUT%$'\n'*}"
+
+        OUT=$(mtls_get "client_cert = $MTLS_DIR/cli.crt")
+        assert_match "cert without key -> config error" \
+            "must be set together" "${OUT%$'\n'*}"
+
+        OUT=$(mtls_get "client_cert = $MTLS_DIR/nope.crt
+client_key  = $MTLS_DIR/cli.key")
+        assert_match "missing cert file -> named error" \
+            "no such file" "${OUT%$'\n'*}"
+
+        OUT=$(mtls_get "client_cert_cmd = echo $MTLS_DIR/cli.crt
+client_key_cmd  = echo $MTLS_DIR/cli.key")
+        assert_eq "_cmd printing a path -> 200" "200" "${OUT##*$'\n'}"
+
+        OUT=$(mtls_get "client_cert_cmd = cat $MTLS_DIR/cli.crt
+client_key_cmd  = cat $MTLS_DIR/cli.key")
+        assert_eq "_cmd printing PEM -> 200"    "200" "${OUT##*$'\n'}"
+
+        OUT=$(mtls_get "client_cert = \${JCI_NOT_SET_ANYWHERE}
+client_key  = $MTLS_DIR/cli.key")
+        assert_match "unexpanded \${VAR} -> named error" \
+            "unexpanded" "${OUT%$'\n'*}"
+
+        { kill "$MTLS_PID"; wait "$MTLS_PID"; } 2>/dev/null
+        trap 'rm -rf "$TMPDIR"' EXIT
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 section "python unit tests"
 
 PY=${PY:-python3}
