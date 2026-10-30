@@ -61,24 +61,32 @@ section "config parsing"
 cat > "$TMPDIR/parse.conf" <<EOF
 # this is a comment
 
-test.plain        $REPO/handlers/hello.sh
-test.gated  GET   $REPO/handlers/hello.sh
-test.spaces       $REPO/handlers/hello.sh extra args here
+test.plain        $REPO/handlers/run hello
+test.gated  GET   $REPO/handlers/run hello
+test.spaces       $REPO/handlers/run hello extra args here
+test.long         /a/very/long/handler/path/that/goes/well/past/sixty/three/characters/in/total/run hello
+test.longgated GET /a/very/long/handler/path/that/goes/well/past/sixty/three/characters/in/total/run hello
 EOF
 
 DEBUG=$(env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/parse.conf" \
         INTERCEPT_DEBUG=1 "$CURL" --max-time 1 http://nope.invalid/ 2>&1 || true)
 
-assert_match "loads 3 routes (comment + blank line ignored)" "loaded 3 route" "$DEBUG"
+assert_match "loads 5 routes (comment + blank line ignored)" "loaded 5 route" "$DEBUG"
 assert_match "no methods -> [*]" "test.plain [*]" "$DEBUG"
 assert_match "GET methods detected"        "test.gated [GET]" "$DEBUG"
 assert_match "handler with spaces preserved" "extra args here" "$DEBUG"
+# A handler path longer than 63 chars used to be split by sscanf's %63s and
+# re-joined with a space -- the first token of the path became its own word.
+assert_match "long handler path kept intact (no methods)" \
+    "test.long [*] -> 127.0.0.5 via /a/very/long/handler/path/that/goes/well/past/sixty/three/characters/in/total/run hello" "$DEBUG"
+assert_match "long handler path kept intact (with methods)" \
+    "test.longgated [GET] -> 127.0.0.6 via /a/very/long/handler/path/that/goes/well/past/sixty/three/characters/in/total/run hello" "$DEBUG"
 
 # ---------------------------------------------------------------------------
 section "basic routing"
 
 cat > "$TMPDIR/routes.conf" <<EOF
-test.hello  $REPO/handlers/hello.sh
+test.hello  $REPO/handlers/run hello
 EOF
 
 shim_curl() {
@@ -93,13 +101,53 @@ assert_match "INTERCEPT_HOST in response" '"host":"test.hello"'         "$RESP"
 assert_match "request line preserved"     '"request":"GET /ping HTTP/1.1"' "$RESP"
 
 # ---------------------------------------------------------------------------
+section "run dispatcher"
+
+# A copy of handlers/ so we can add a fixture handler that declares a
+# dependency without a venv -- the 503 path.
+HCOPY="$TMPDIR/handlers"
+cp -R "$REPO/handlers" "$HCOPY"
+mkdir -p "$HCOPY/lib/needsdeps"
+printf 'import somepkg\n' > "$HCOPY/lib/needsdeps/handler.py"
+printf 'somepkg>=1\n'      > "$HCOPY/lib/needsdeps/requirements.txt"
+
+cat > "$TMPDIR/run.conf" <<EOF
+test.hello   $HCOPY/run hello
+test.meta    $HCOPY/run shim-meta
+test.nope    $HCOPY/run no-such-handler
+test.evil    $HCOPY/run ../lib/hello
+test.needs   $HCOPY/run needsdeps
+EOF
+run_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/run.conf" \
+        INTERCEPT_BACKENDS_CONF=/dev/null JCI_HANDLERS="$HCOPY" \
+        "$CURL" -s "$@"
+}
+RESP=$(run_curl http://test.hello/ping)
+assert_match "run hello -> bash handler ran"      '"handler":"hello.sh"' "$RESP"
+RESP=$(run_curl -w '\n%{http_code}' http://test.meta/routes)
+assert_eq    "run shim-meta /routes -> 200"       "200" "${RESP##*$'\n'}"
+assert_match "shim-meta /routes shows methods"    '"methods"' "${RESP%$'\n'*}"
+RESP=$(run_curl -w '\n%{http_code}' http://test.nope/)
+assert_eq    "unknown handler -> 404"             "404" "${RESP##*$'\n'}"
+assert_match "404 lists available handlers"       '"available"' "${RESP%$'\n'*}"
+assert_match "404 list includes hello"            'hello' "${RESP%$'\n'*}"
+RESP=$(run_curl -w '\n%{http_code}' http://test.evil/)
+assert_eq    "path-traversal name -> 404"         "404" "${RESP##*$'\n'}"
+assert_match "traversal names the problem"        'invalid handler name' "${RESP%$'\n'*}"
+RESP=$(run_curl -i http://test.needs/)
+assert_match "deps without venv -> 503"           'HTTP/1.1 503' "$RESP"
+assert_match "503 names the install command"      'jci handler install needsdeps' "$RESP"
+assert_match "503 is from jci-run"                'X-Handled-By: jci-run' "$RESP"
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF
-test.ro     GET           $REPO/handlers/hello.sh
-test.rw     GET,POST      $REPO/handlers/hello.sh
-test.any                  $REPO/handlers/hello.sh
-test.star   *             $REPO/handlers/hello.sh
+test.ro     GET           $REPO/handlers/run hello
+test.rw     GET,POST      $REPO/handlers/run hello
+test.any                  $REPO/handlers/run hello
+test.star   *             $REPO/handlers/run hello
 EOF
 
 perm_curl() {
@@ -124,7 +172,7 @@ assert_match "Allow header present on 405" "Allow: GET" "$ALLOW"
 # The gate lives in the shim, not the handler: a denied request must never
 # spawn the handler at all. The route's handler leaves a marker file if run.
 cat > "$TMPDIR/spy.conf" <<EOF
-test.spy  GET  touch $TMPDIR/spy-ran; exec $REPO/handlers/hello.sh
+test.spy  GET  touch $TMPDIR/spy-ran; exec $REPO/handlers/run hello
 EOF
 spy_curl() {
     env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/spy.conf" \
@@ -190,7 +238,7 @@ if [ -z "$HELPER_SHELL" ]; then
     printf '  \033[33m~\033[0m no non-SIP shell found, skipping helper tests\n'
 else
     cat > "$TMPDIR/helpers.conf" <<EOF
-test.helper  $REPO/handlers/hello.sh
+test.helper  $REPO/handlers/run hello
 EOF
 
     # The script under test has the `#!/usr/bin/env bash` shebang that makes

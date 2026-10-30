@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# jci handler dispatcher. A route line says:
+#
+#     mylocal.kafka    ${JCI_HANDLERS}/run kafka
+#
+# and this picks the interpreter for handlers/lib/kafka/ and execs it with
+# stdin/stdout still wired to the client's socket. It never reads the
+# request. The only HTTP it writes is the two errors below, when it can't
+# hand off at all: an unknown handler (404) or one whose dependencies
+# aren't installed yet (503, naming the install command).
+set -u
+
+JCI_HANDLERS="${JCI_HANDLERS:-$HOME/.just_curl_it/handlers}"
+LIB="$JCI_HANDLERS/lib"
+name="${1-}"
+
+respond() {  # <status> <reason> <json-body>
+    local body="$3"
+    printf 'HTTP/1.1 %s %s\r\n' "$1" "$2"
+    printf 'Content-Type: application/json\r\n'
+    printf 'Content-Length: %d\r\n' "${#body}"
+    printf 'X-Handled-By: jci-run\r\n'
+    printf 'Connection: close\r\n\r\n'
+    printf '%s' "$body"
+    # Half-close, then drain whatever the client sent so our close is a FIN
+    # and not a RST that beats the response to the client.
+    exec 1>&-
+    cat >/dev/null
+    exit 0
+}
+
+available() {
+    local d names=""
+    for d in "$LIB"/*/; do
+        [ -d "$d" ] || continue
+        names="$names${names:+,}\"$(basename "$d")\""
+    done
+    printf '[%s]' "$names"
+}
+
+case "$name" in
+    "")                respond 404 "Not Found" '{"error":"usage: run <handler>","handler":"run"}' ;;
+    *[!a-z0-9_-]*|-*|_*) respond 404 "Not Found" \
+        "{\"error\":\"invalid handler name: ${name//\"/}\",\"handler\":\"run\"}" ;;
+esac
+
+dir="$LIB/$name"
+if [ ! -d "$dir" ]; then
+    respond 404 "Not Found" \
+        "{\"error\":\"no handler '$name'\",\"handler\":\"run\",\"available\":$(available)}"
+fi
+
+export JCI_HANDLER="$name"
+export PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
+
+if [ -f "$dir/handler.sh" ]; then
+    exec bash "$dir/handler.sh"
+fi
+
+if [ -f "$dir/handler.py" ]; then
+    venv_py="$JCI_HANDLERS/venv/$name/bin/python"
+    if [ -x "$venv_py" ]; then
+        exec "$venv_py" "$dir/handler.py"
+    fi
+    # Needs deps if requirements.txt has a line that isn't blank or a comment.
+    if [ -f "$dir/requirements.txt" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$dir/requirements.txt"; then
+        respond 503 "Service Unavailable" \
+            "{\"error\":\"handler '$name' is not installed\",\"handler\":\"run\",\"install\":\"jci handler install $name\"}"
+    fi
+    exec "${JCI_PYTHON:-python3}" "$dir/handler.py"
+fi
+
+respond 404 "Not Found" \
+    "{\"error\":\"handler '$name' has no handler.py or handler.sh\",\"handler\":\"run\"}"

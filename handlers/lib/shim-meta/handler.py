@@ -1,37 +1,29 @@
 #!/usr/bin/env python3
-"""HTTP adapter that introspects the shim itself.
+"""Introspect the active jci env: the route table and (redacted) backends.
 
 Routes:
-  GET /         index: routes + backends
-  GET /routes   parsed routes.conf
-  GET /backends parsed backends.conf
+  GET /          routes + backends
+  GET /routes    parsed routes.conf: host, methods, handler
+  GET /backends  parsed backends.conf, secrets redacted
   GET /_info
 """
 from __future__ import annotations
 
 import configparser
 import os
-import sys
-import traceback
+import re
 from urllib.parse import urlsplit
 
-from shim import read_request, send_json
+import jci
 
-HOST = os.environ.get("INTERCEPT_HOST", "")
-ROUTES_PATH = os.environ.get("INTERCEPT_CONFIG",
-                             "/etc/intercept/routes.conf")
-BACKENDS_PATH = os.environ.get("INTERCEPT_BACKENDS_CONF",
-                               "/etc/intercept/backends.conf")
+ROUTES_PATH = os.environ.get("INTERCEPT_CONFIG", "/etc/intercept/routes.conf")
+BACKENDS_PATH = os.environ.get("INTERCEPT_BACKENDS_CONF", "/etc/intercept/backends.conf")
 
-_INFO = {
-    "handler": "shim",
-    "routes": [
-        "GET /",
-        "GET /routes",
-        "GET /backends",
-        "GET /_info",
-    ],
-}
+ROUTES = ["GET /", "GET /routes", "GET /backends", "GET /_info"]
+
+# Same rule as the shim's is_method_token(): the optional second column is
+# all uppercase letters, commas or '*'.
+_METHODS = re.compile(r"^[A-Z,*]+$")
 
 
 def read_routes() -> list[dict]:
@@ -43,47 +35,37 @@ def read_routes() -> list[dict]:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            parts = s.split(None, 1)
-            if len(parts) == 2:
-                out.append({"host": parts[0], "handler": parts[1]})
+            parts = s.split(None, 2)
+            if len(parts) < 2:
+                continue
+            if len(parts) == 3 and _METHODS.match(parts[1]):
+                host, methods, handler = parts
+            else:
+                host, methods, handler = parts[0], "*", " ".join(parts[1:])
+            out.append({"host": host, "methods": methods, "handler": handler})
     return out
 
 
 def read_backends() -> dict:
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)
     cp.read(BACKENDS_PATH)
-    return {s: dict(cp[s]) for s in cp.sections()}
+    return {s: jci.redact(dict(cp[s])) for s in cp.sections()}
 
 
 def route(method: str, path: str, headers: dict, body: bytes) -> None:
     p = urlsplit(path).path.rstrip("/") or "/"
     if method != "GET":
-        return send_json(405, {"error": "only GET"}, handler="shim")
+        return jci.send_error(405, "only GET", allow=["GET"])
     if p == "/_info":
-        return send_json(200, {**_INFO, "host": HOST}, handler="shim")
+        return jci.info("meta", ROUTES)
     if p == "/routes":
-        return send_json(200, {"routes": read_routes()}, handler="shim")
+        return jci.send_json(200, {"routes": read_routes()})
     if p == "/backends":
-        return send_json(200, {"backends": read_backends()}, handler="shim")
+        return jci.send_json(200, {"backends": read_backends()})
     if p == "/":
-        return send_json(200, {
-            "routes": read_routes(),
-            "backends": read_backends(),
-        }, handler="shim")
-    send_json(404, {"error": f"no route for {method} {p}"}, handler="shim")
-
-
-def main() -> None:
-    try:
-        method, path, headers, body = read_request()
-    except Exception as e:
-        return send_json(400, {"error": f"bad request: {e}"}, handler="shim")
-    try:
-        route(method, path, headers, body)
-    except Exception as e:
-        sys.stderr.write(traceback.format_exc())
-        send_json(500, {"error": f"{type(e).__name__}: {e}"}, handler="shim")
+        return jci.send_json(200, {"routes": read_routes(), "backends": read_backends()})
+    jci.send_error(404, f"no route for {method} {p}")
 
 
 if __name__ == "__main__":
-    main()
+    jci.main(route)

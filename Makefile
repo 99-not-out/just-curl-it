@@ -26,8 +26,14 @@ install: build
 	cp lib/helpers.sh $(JCI_HOME)/lib/
 	cp bin/jci $(JCI_HOME)/bin/
 	chmod +x  $(JCI_HOME)/bin/jci
-	find handlers -mindepth 1 -maxdepth 1 -type f -exec cp {} $(JCI_HOME)/handlers/ \;
-	chmod +x  $(JCI_HOME)/handlers/*
+	# The handler library ships inert: source + READMEs, no venvs. Venvs are
+	# created per handler by `jci handler install` and live outside lib/.
+	cp handlers/run $(JCI_HOME)/handlers/run
+	chmod +x $(JCI_HOME)/handlers/run
+	rm -rf $(JCI_HOME)/handlers/lib
+	cp -R handlers/lib $(JCI_HOME)/handlers/lib
+	find $(JCI_HOME)/handlers/lib -name '__pycache__' -type d -prune -exec rm -rf {} +
+	find $(JCI_HOME)/handlers/lib -name 'handler.sh' -exec chmod +x {} +
 	@if [ -d envs ]; then cp -R envs/. $(JCI_HOME)/envs/; fi
 	@echo
 	@echo "installed to $(JCI_HOME)"
