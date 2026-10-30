@@ -222,6 +222,116 @@ static int do_getaddrinfo(const char *node, const char *service,
     return call_real_getaddrinfo(node, service, hints, res);
 }
 
+/* ---- method gate -------------------------------------------------------
+ *
+ * The route's allow-list is enforced here, in the shim, before the handler
+ * is spawned. Handlers stay dumb filters and can't forget to check; a denied
+ * request never runs any handler code at all. We MSG_PEEK the request line
+ * so the handler we do spawn still sees the full, unconsumed request. */
+
+static int method_allowed(const struct route *r, const char *method) {
+    if (!r->methods[0] || strchr(r->methods, '*')) return 1;
+    size_t mlen = strlen(method);
+    const char *p = r->methods;
+    for (;;) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == mlen && strncmp(p, method, mlen) == 0) return 1;
+        if (!end) return 0;
+        p = end + 1;
+    }
+}
+
+/* Peek the request method off the socket without consuming it. Returns 0
+ * if what arrived doesn't look like an HTTP/1.x request line (TLS hello,
+ * garbage, EOF) -- callers fail closed on that. The pending SIGALRM is the
+ * hard bound on how long we'll wait for the line to show up. */
+static int peek_method(int conn, char *out, size_t outsz) {
+    char buf[256];
+    for (int tries = 0; tries < 500; tries++) {   /* ~5s at 10ms */
+        ssize_t n = recv(conn, buf, sizeof(buf), MSG_PEEK);
+        if (n == 0) return 0;
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) { usleep(10000); continue; }
+            return 0;
+        }
+        char *sp = memchr(buf, ' ', (size_t)n);
+        if (!sp) {
+            if ((size_t)n >= sizeof(buf)) return 0;  /* no method in 256 bytes */
+            usleep(10000);                           /* partial write; wait */
+            continue;
+        }
+        size_t len = (size_t)(sp - buf);
+        if (len == 0 || len >= outsz) return 0;
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)buf[i];
+            if (c <= 0x20 || c >= 0x7f) return 0;   /* not a token char */
+        }
+        memcpy(out, buf, len);
+        out[len] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void write_all(int fd, const char *s, size_t n) {
+    while (n > 0) {
+        ssize_t w = write(fd, s, n);
+        if (w < 0) { if (errno == EINTR) continue; return; }
+        s += w; n -= (size_t)w;
+    }
+}
+
+/* Answer a request the gate refused, then drain the client's bytes so the
+ * close is a FIN and not a RST (unread data at close() resets the socket,
+ * and curl would report the reset before it reads our response). */
+static void gate_reject(int conn, const struct route *r, const char *method) {
+    char allow_json[160] = "";
+    size_t aj = 0;
+    for (const char *p = r->methods; *p && aj < sizeof(allow_json) - 8;) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len > sizeof(allow_json) - aj - 8) break;
+        aj += (size_t)snprintf(allow_json + aj, sizeof(allow_json) - aj,
+                               "%s\"%.*s\"", aj ? "," : "", (int)len, p);
+        if (!end) break;
+        p = end + 1;
+    }
+
+    char body[512], hdr[512];
+    int bl, hl;
+    if (method) {
+        bl = snprintf(body, sizeof(body),
+                      "{\"error\":\"method %s not allowed for this route\","
+                      "\"allow\":[%s]}", method, allow_json);
+        hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 405 Method Not Allowed\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Allow: %s\r\n"
+                      "Content-Length: %d\r\n"
+                      "X-Handled-By: jci-gate\r\n"
+                      "Connection: close\r\n\r\n", r->methods, bl);
+    } else {
+        bl = snprintf(body, sizeof(body),
+                      "{\"error\":\"not an HTTP/1.x request; this route is "
+                      "gated to [%s] and the method could not be read\"}",
+                      r->methods);
+        hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 400 Bad Request\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %d\r\n"
+                      "X-Handled-By: jci-gate\r\n"
+                      "Connection: close\r\n\r\n", bl);
+    }
+    write_all(conn, hdr, (size_t)hl);
+    write_all(conn, body, (size_t)bl);
+    shutdown(conn, SHUT_WR);
+    alarm(5);
+    char sink[4096];
+    while (read(conn, sink, sizeof(sink)) > 0) {}
+    close(conn);
+}
+
 static int spawn_handler_and_connect(int sockfd, struct route *r,
                                      sa_family_t caller_family) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -258,6 +368,8 @@ static int spawn_handler_and_connect(int sockfd, struct route *r,
         unsetenv("LD_PRELOAD");
 #endif
         setenv("INTERCEPT_HOST", r->host, 1);
+        /* Informational only -- the allow-list is enforced below, before
+         * exec, so handlers needn't (and shouldn't) re-check it. */
         if (r->methods[0]) {
             setenv("INTERCEPT_METHODS", r->methods, 1);
         } else {
@@ -282,6 +394,19 @@ static int spawn_handler_and_connect(int sockfd, struct route *r,
         int conn = accept(listen_fd, NULL, NULL);
         close(listen_fd);
         if (conn < 0) _exit(1);
+
+        /* Method gate, still under the accept alarm: a gated route whose
+         * request line never arrives dies with the same timeout. */
+        if (r->methods[0] && !strchr(r->methods, '*')) {
+            char method[32];
+            int got = peek_method(conn, method, sizeof(method));
+            if (!got || !method_allowed(r, method)) {
+                dbg("gate: %s %s -> %s", got ? method : "?", r->host,
+                    got ? "405" : "400");
+                gate_reject(conn, r, got ? method : NULL);
+                _exit(0);
+            }
+        }
         alarm(0);
 
         dup2(conn, 0);

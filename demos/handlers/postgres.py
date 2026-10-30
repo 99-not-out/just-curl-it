@@ -9,6 +9,10 @@ Implements `query` shape natively, plus `stream` shape for LISTEN/NOTIFY:
     POST /query                   body = SQL (text/plain) or
                                   {"sql": "...", "params": [...]} (application/json)
 
+  GET runs inside a READ ONLY transaction, so a `GET`-only route in
+  routes.conf really is read-only: `GET /query?sql=DROP+TABLE+x` is refused
+  by Postgres with a 405 pointing at POST. Only POST may mutate.
+
   stream shape (LISTEN/NOTIFY):
     POST /stream/<channel>        pg_notify(channel, body); body = payload
     GET  /stream/<channel>/tail   LISTEN; SSE stream
@@ -34,8 +38,8 @@ _INFO = {
     "routes": [
         "GET    /_info",
         "GET    /tables",
-        "GET    /query?sql=SELECT...",
-        "POST   /query                  (body = SQL or {sql, params})",
+        "GET    /query?sql=SELECT...    (READ ONLY transaction)",
+        "POST   /query                  (body = SQL or {sql, params}; may mutate)",
         "POST   /stream/{channel}       (pg_notify; body = payload)",
         "GET    /stream/{channel}/tail  (LISTEN; SSE stream)",
     ],
@@ -48,9 +52,20 @@ def connect():
     return psycopg.connect(cfg["dsn"])
 
 
-def run_query(sql: str, params=None) -> None:
+def run_query(sql: str, params=None, read_only: bool = False) -> None:
+    from psycopg.errors import ReadOnlySqlTransaction
     with connect() as conn, conn.cursor() as cur:
-        cur.execute(sql, params or None)
+        # HTTP semantics onto SQL: GET may not mutate. Postgres enforces it
+        # (default_transaction_read_only), not a regex over the statement.
+        conn.read_only = read_only
+        try:
+            cur.execute(sql, params or None)
+        except ReadOnlySqlTransaction as e:
+            return send_json(405, {
+                "error": f"GET /query is read-only: {e.diag.message_primary}",
+                "hint": "use POST /query to run statements that write",
+                "allow": ["POST"],
+            }, handler="postgres")
         if cur.description is None:
             conn.commit()
             return send_json(200, {"rowCount": cur.rowcount}, handler="postgres")
@@ -148,7 +163,8 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
             "SELECT schemaname, tablename "
             "FROM pg_catalog.pg_tables "
             "WHERE schemaname NOT IN ('pg_catalog','information_schema') "
-            "ORDER BY schemaname, tablename"
+            "ORDER BY schemaname, tablename",
+            read_only=True,
         )
 
     if p == "/query":
@@ -156,7 +172,7 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
             sql = qs.get("sql", [""])[0]
             if not sql:
                 return send_json(400, {"error": "missing ?sql="}, handler="postgres")
-            return run_query(sql)
+            return run_query(sql, read_only=True)
         if method == "POST":
             try:
                 sql, params = parse_sql_from_body(headers, body)

@@ -3,12 +3,12 @@
 #   - build sanity
 #   - routes.conf parsing (comments, methods detection, handler with spaces)
 #   - end-to-end interception (curl -> sentinel IP -> spawned handler)
-#   - method permissions (GET-only denies POST/DELETE; Allow header)
+#   - method permissions, enforced in the shim (GET-only denies POST/DELETE
+#     with an Allow header, and the handler is never spawned)
 #   - SSE responses stream progressively instead of buffering to handler exit
 #   - jci-run restores the shim in scripts whose shebang lost it to SIP
 #   - auth proxy header injection (against httpbin.org if reachable)
 #   - AF_INET6 with v4-mapped destinations (the Java HttpClient case)
-#   - Python unit tests for enforce_methods in proxy.py and shim.py
 #
 # Usage: ./tests/run.sh
 #        make test
@@ -120,6 +120,25 @@ ALLOW=$(env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/perms.conf" \
         JCI_HANDLERS="$REPO/handlers" "$CURL" -s -i -X POST -d x http://test.ro/ \
         | tr -d '\r' | grep -i '^allow:')
 assert_match "Allow header present on 405" "Allow: GET" "$ALLOW"
+
+# The gate lives in the shim, not the handler: a denied request must never
+# spawn the handler at all. The route's handler leaves a marker file if run.
+cat > "$TMPDIR/spy.conf" <<EOF
+test.spy  GET  touch $TMPDIR/spy-ran; exec $REPO/handlers/hello.sh
+EOF
+spy_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/spy.conf" \
+        JCI_HANDLERS="$REPO/handlers" "$CURL" -s -o /dev/null -w '%{http_code}' "$@"
+}
+rm -f "$TMPDIR/spy-ran"
+assert_eq "denied request -> 405"  "405" "$(spy_curl -X DELETE http://test.spy/)"
+sleep 0.2  # the handler is a detached grandchild; give it a beat to not run
+[ ! -e "$TMPDIR/spy-ran" ] && ok "denied request never spawned the handler" \
+    || bad "denied request spawned the handler"
+assert_eq "allowed request -> 200"  "200" "$(spy_curl http://test.spy/)"
+sleep 0.2
+[ -e "$TMPDIR/spy-ran" ] && ok "allowed request spawned the handler" \
+    || bad "allowed request didn't spawn the handler"
 
 # ---------------------------------------------------------------------------
 section "sse streaming"
@@ -442,46 +461,6 @@ client_key  = $MTLS_DIR/cli.key")
         trap 'rm -rf "$TMPDIR"' EXIT
     fi
 fi
-
-# ---------------------------------------------------------------------------
-section "python unit tests"
-
-PY=${PY:-python3}
-
-run_unit() {
-    local module_dir="$1" module="$2" allow="$3" method="$4"
-    local args=(env "PYTHONPATH=$module_dir")
-    [ "$allow" != "-" ] && args+=("INTERCEPT_METHODS=$allow")
-    "${args[@]}" "$PY" -c "
-import sys
-sys.path.insert(0, '$module_dir')
-import $module
-$module.enforce_methods('$method')
-" 2>&1
-}
-
-# proxy.py: stdlib-only enforcement
-RES=$(run_unit "$REPO/handlers" proxy "-" POST)
-[ -z "$RES" ] && ok "proxy: no INTERCEPT_METHODS allows anything" || bad "proxy unrestricted" "$RES"
-
-RES=$(run_unit "$REPO/handlers" proxy "*" DELETE)
-[ -z "$RES" ] && ok "proxy: '*' allows anything"             || bad "proxy wildcard" "$RES"
-
-RES=$(run_unit "$REPO/handlers" proxy "GET,POST" GET)
-[ -z "$RES" ] && ok "proxy: method in list -> pass"          || bad "proxy in list" "$RES"
-
-RES=$(run_unit "$REPO/handlers" proxy "GET" POST)
-assert_match "proxy: method not in list -> 405" "405 Method Not Allowed" "$RES"
-
-# shim.py: same logic, used by demo handlers
-RES=$(run_unit "$REPO/demos/handlers" shim "-" POST)
-[ -z "$RES" ] && ok "shim:  no INTERCEPT_METHODS allows anything" || bad "shim unrestricted" "$RES"
-
-RES=$(run_unit "$REPO/demos/handlers" shim "GET" POST)
-assert_match "shim:  method not in list -> 405" "405 Method Not Allowed" "$RES"
-
-RES=$(run_unit "$REPO/demos/handlers" shim "GET,POST" POST)
-[ -z "$RES" ] && ok "shim:  method in list -> pass" || bad "shim in list" "$RES"
 
 # ---------------------------------------------------------------------------
 section "summary"

@@ -55,31 +55,6 @@ HOP_BY_HOP_RESPONSE = {
 }
 
 
-def enforce_methods(method: str) -> None:
-    """Honor the route's INTERCEPT_METHODS allow-list set by the shim."""
-    allowed = os.environ.get("INTERCEPT_METHODS", "").strip()
-    if not allowed or "*" in allowed:
-        return
-    methods = {m.strip().upper() for m in allowed.split(",") if m.strip()}
-    if method.upper() in methods:
-        return
-    import json
-    out = sys.stdout.buffer
-    body = json.dumps({
-        "error": f"method {method} not allowed for this route",
-        "allow": sorted(methods),
-    }).encode()
-    out.write(b"HTTP/1.1 405 Method Not Allowed\r\n")
-    out.write(b"Content-Type: application/json\r\n")
-    out.write(f"Allow: {', '.join(sorted(methods))}\r\n".encode())
-    out.write(f"Content-Length: {len(body)}\r\n".encode())
-    out.write(b"X-Handled-By: jci-gate\r\n")
-    out.write(b"Connection: close\r\n\r\n")
-    out.write(body)
-    out.flush()
-    sys.exit(0)
-
-
 def read_request(stdin):
     def readline() -> bytes:
         buf = bytearray()
@@ -96,7 +71,6 @@ def read_request(stdin):
     if len(parts) < 3:
         raise ValueError(f"bad request line: {req_line!r}")
     method, path, _ = parts
-    enforce_methods(method)
     headers: list[tuple[str, str]] = []
     while True:
         line = readline().decode("iso-8859-1")

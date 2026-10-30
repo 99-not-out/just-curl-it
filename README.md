@@ -129,8 +129,18 @@ mylocal.prod-db     GET             ${JCI_HANDLERS}/run-handler postgres
 mylocal.api         GET,POST,PUT    ${JCI_HANDLERS}/proxy.py
 ```
 
+The allow-list is enforced by the shim itself, before the handler is
+spawned: it peeks the request line off the socket, and a denied method gets
+a `405` (with an `Allow:` header) without any handler code running. Handlers
+don't check methods, can't forget to, and a five-line bash handler is gated
+exactly as well as a Python one.
+
 Method-level perms are the headline safety story for the LLM-sandbox case:
 "agent can read prod, can't mutate it" is a config line, not a code review.
+One caveat worth knowing: `GET` is only as safe as the handler makes it.
+The bundled Postgres handler runs `GET /query` in a read-only transaction
+for exactly this reason; a handler you write should do the same for its
+own backend.
 
 ## Auth proxy
 
@@ -238,9 +248,9 @@ no kernel modules.
 make test
 ```
 
-Real shim + real curl, end-to-end: routing, method permissions, the
-`AF_INET6` v4-mapped path, auth-proxy header injection. Plus subprocess
-unit tests for the Python gate logic. See `tests/README.md`.
+Real shim + real curl, end-to-end: routing, shim-enforced method
+permissions, SSE streaming, the `AF_INET6` v4-mapped path, auth-proxy header
+injection and mTLS upstreams. See `tests/README.md`.
 
 ## Demos
 
