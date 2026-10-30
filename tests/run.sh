@@ -227,6 +227,51 @@ assert_match "install nosuch names the problem" "no such handler" "$OUT"
 assert_match "doctor lists venv handlers"      "handler withdeps:" "$(jh doctor 2>&1)"
 
 # ---------------------------------------------------------------------------
+section "handler: sqlite"
+
+"${PY:-python3}" -c "import sqlite3; c=sqlite3.connect('$TMPDIR/t.db'); c.execute('create table t(x int)'); c.commit()"
+cat > "$TMPDIR/sq.conf" <<EOF
+test.sq      $REPO/handlers/run sqlite
+test.sqro    $REPO/handlers/run sqlite
+test.sqnone  $REPO/handlers/run sqlite
+EOF
+cat > "$TMPDIR/sq-backends.conf" <<EOF
+[test.sq]
+path = $TMPDIR/t.db
+[test.sqro]
+path = $TMPDIR/t.db
+readonly = true
+[test.sqnone]
+path = $TMPDIR/missing.db
+EOF
+sq_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/sq.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/sq-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s -w '\n%{http_code}' "$@"
+}
+RESP=$(sq_curl http://test.sq/tables)
+assert_eq    "sqlite /tables -> 200"                 "200" "${RESP##*$'\n'}"
+assert_match "sqlite /tables lists t"                '"t"' "${RESP%$'\n'*}"
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode 'sql=select count(*) from t')
+assert_match "sqlite GET select -> 0 rows"           '"rows": [[0]]' "${RESP%$'\n'*}"
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode 'sql=insert into t values (1)')
+assert_eq    "sqlite GET insert -> 405"              "405" "${RESP##*$'\n'}"
+assert_match "sqlite GET insert points at POST"      '"allow": ["POST"]' "${RESP%$'\n'*}"
+RESP=$(sq_curl -X POST http://test.sq/query -d 'insert into t values (1)')
+assert_eq    "sqlite POST insert -> 200"             "200" "${RESP##*$'\n'}"
+assert_match "sqlite POST insert rowCount 1"         '"rowCount": 1' "${RESP%$'\n'*}"
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode 'sql=select count(*) from t')
+assert_match "sqlite GET select sees the row"        '"rows": [[1]]' "${RESP%$'\n'*}"
+RESP=$(sq_curl -X POST http://test.sqro/query -d 'insert into t values (2)')
+assert_eq    "sqlite readonly=true POST -> 405"      "405" "${RESP##*$'\n'}"
+assert_match "sqlite readonly=true names the key"    'readonly' "${RESP%$'\n'*}"
+RESP=$(sq_curl http://test.sqnone/tables)
+assert_eq    "sqlite missing file -> 502"            "502" "${RESP##*$'\n'}"
+assert_match "sqlite missing file named"             'missing.db' "${RESP%$'\n'*}"
+[ ! -e "$TMPDIR/missing.db" ] && ok "sqlite never creates a missing database" \
+    || bad "sqlite created $TMPDIR/missing.db"
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF
