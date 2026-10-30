@@ -189,7 +189,8 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
     if method == "GET" and p == "/_info":
         return jci.info("stream", ROUTES)
 
-    conf = broker_conf(jci.load_backend())
+    cfg = jci.load_backend()
+    conf = broker_conf(cfg)
 
     if method == "GET" and p == "/streams":
         return handle_list_topics(conf)
@@ -200,6 +201,9 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
         if method == "GET":
             return handle_topic_details(conf, topic)
         if method == "POST":
+            bad = jci.payload_error(cfg, topic, body)
+            if bad:
+                return jci.send_error(400, bad, channel=topic)
             key = qs.get("key", [None])[0]
             return handle_produce(conf, topic, body, key.encode("utf-8") if key else None)
         if method == "DELETE":

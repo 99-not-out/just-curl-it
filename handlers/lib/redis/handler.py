@@ -107,6 +107,9 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
     m = re.fullmatch(r"/stream/([^/]+)", p)
     if m and method == "POST":
         ch = m.group(1)
+        bad = jci.payload_error(cfg, ch, body)
+        if bad:
+            return jci.send_error(400, bad, channel=ch)
         return jci.send_json(200, {"name": ch, "receivers": int(r.publish(ch, body))})
 
     if re.fullmatch(r"/stream/([^/]+)/peek", p):

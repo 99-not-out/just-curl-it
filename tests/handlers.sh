@@ -221,6 +221,18 @@ if install_or_skip mqtt mqtt; then
     assert_match "mqtt /_info has shape"                      '"stream"' "$(body "$OUT")"
     assert_match "mqtt /_info renders the AsyncAPI channels"  '"channel": "home/{room}/temperature"' "$(body "$OUT")"
     assert_match "mqtt /_info gives a tail curl per channel"  'curl -N http://mylocal.mqtt/stream/home/alerts/tail' "$(body "$OUT")"
+
+    # validate = true in the demo env: a POST to a channel the spec knows is
+    # checked against its message schema; unknown channels pass through.
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/home/kitchen/temperature" -H 'content-type: application/json' -d '{"celsius":"warm"}')
+    assert_eq    "mqtt validate: bad payload -> 400"          "400" "$(code "$OUT")"
+    assert_match "mqtt validate: error names the field"       'celsius' "$(body "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/home/kitchen/temperature" -H 'content-type: application/json' -d '{"celsius":21.5}')
+    assert_eq    "mqtt validate: good payload -> 200"         "200" "$(code "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/home/kitchen/light" -d 'dim')
+    assert_eq    "mqtt validate: enum violation -> 400"       "400" "$(code "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/home/kitchen/light" -d 'on')
+    assert_eq    "mqtt validate: enum member -> 200"          "200" "$(code "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

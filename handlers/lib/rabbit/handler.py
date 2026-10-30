@@ -110,6 +110,10 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
     m = re.fullmatch(r"/stream/([^/]+)", p)
     if m:
         q = m.group(1)
+        if method == "POST":
+            bad = jci.payload_error(cfg, q, body)
+            if bad:
+                return jci.send_error(400, bad, channel=q)
         conn = amqp_conn(cfg)
         try:
             if method == "GET":

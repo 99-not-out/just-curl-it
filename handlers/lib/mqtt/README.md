@@ -45,6 +45,7 @@ timeout   = 5                     # connect / publish-ack timeout
 # Optional: an AsyncAPI document (path or URL; JSON, or YAML with PyYAML in
 # this handler's venv) turns GET /_info into a channel menu with example curls.
 # asyncapi = ~/specs/events.json
+# validate = true     # check POST bodies against the channel's message schema; strict also refuses unknown channels
 ```
 
 ## Notes

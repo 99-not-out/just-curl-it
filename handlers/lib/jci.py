@@ -408,6 +408,81 @@ def openapi_menu(spec: dict, host: str) -> dict:
     return out
 
 
+def match_channel(spec: dict, channel: str) -> str | None:
+    """The spec's channel key that `channel` addresses: an exact key, or a
+    templated one (`home/{room}/temperature`) where each {param} matches
+    exactly one segment. AsyncAPI 3 channels match on their `address`."""
+    v3 = str(spec.get("asyncapi", "")).startswith("3")
+    for key, ch in (spec.get("channels") or {}).items():
+        pattern = (ch.get("address") or key) if (v3 and isinstance(ch, dict)) else key
+        if pattern == channel:
+            return key
+        if "{" in pattern:
+            rx = "^" + re.sub(r"\\\{[^/]+?\\\}", r"[^/]+", re.escape(pattern)) + "$"
+            if re.match(rx, channel):
+                return key
+    return None
+
+
+def channel_payload_schema(spec: dict, key: str):
+    """The payload schema of the channel's (first) message, or None."""
+    ch = (spec.get("channels") or {}).get(key) or {}
+    if str(spec.get("asyncapi", "")).startswith("3"):
+        for m in (ch.get("messages") or {}).values():
+            if isinstance(m, dict) and "payload" in m:
+                return m["payload"]
+        return None
+    for kind in ("publish", "subscribe"):
+        m = ((ch.get(kind) or {}).get("message") or {})
+        if "oneOf" in m and m["oneOf"]:
+            m = m["oneOf"][0]
+        if isinstance(m, dict) and "payload" in m:
+            return m["payload"]
+    return None
+
+
+def payload_error(cfg: dict, channel: str, body: bytes) -> str | None:
+    """With `asyncapi =` and `validate = true|strict` in the config, the
+    reason a POST body is not a valid message for `channel`, else None.
+    `true` lets channels the spec doesn't know pass; `strict` refuses them.
+    Needs jsonschema in the handler's venv."""
+    mode = str(cfg.get("validate", "")).strip().lower()
+    if mode not in ("true", "1", "yes", "on", "strict") or not cfg.get("asyncapi"):
+        return None
+    spec = load_spec(cfg["asyncapi"])
+    key = match_channel(spec, channel)
+    if key is None:
+        return f"channel {channel!r} is not in the AsyncAPI document" if mode == "strict" else None
+    schema = channel_payload_schema(spec, key)
+    if schema is None:
+        return None
+    try:
+        import jsonschema  # type: ignore
+    except ImportError:
+        raise BackendConfigError(
+            "validate = true needs the jsonschema package in this handler's venv "
+            "(jci handler install <name> after adding it to requirements.txt)") from None
+    text = body.decode("utf-8", "replace")
+    if isinstance(schema, dict) and (schema.get("type") in ("object", "array") or "properties" in schema):
+        try:
+            value = json.loads(text)
+        except ValueError as e:
+            return f"message for {key} must be JSON: {e}"
+    else:
+        try:
+            value = json.loads(text)       # a JSON scalar ("on") or a number
+        except ValueError:
+            value = text                   # raw text is a string payload
+    try:
+        jsonschema.validate(value, schema)
+    except jsonschema.ValidationError as e:
+        where = "/".join(str(p) for p in e.absolute_path) or "(root)"
+        return f"message for {key} invalid at {where}: {e.message}"
+    except jsonschema.SchemaError as e:
+        return f"the spec's schema for {key} is itself invalid: {e.message}"
+    return None
+
+
 def asyncapi_menu(spec: dict, host: str) -> dict:
     """{"title","version","channels":[{channel,description,message,payload,curl}]}
     from an AsyncAPI 2.x or 3.x document, mapped onto the stream shape."""

@@ -207,6 +207,9 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
                 qos = int(qs.get("qos", ["1"])[0])
                 if qos not in (0, 1, 2):
                     return jci.send_error(400, "qos must be 0, 1 or 2")
+                bad = jci.payload_error(cfg, topic, body)
+                if bad:
+                    return jci.send_error(400, bad, channel=topic)
                 return handle_publish(cfg, topic, body, qos, _truthy(qs.get("retain", ["0"])[0]))
             if method == "DELETE":
                 return handle_clear(cfg, topic)
