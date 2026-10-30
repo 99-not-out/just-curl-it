@@ -1,14 +1,15 @@
 JCI_HOME ?= $(HOME)/.just_curl_it
 
-# Pick a non-SIP python for the demos venv (brewed if available; otherwise
-# whatever python3 the user has — fine on Linux, may not load the shim on
-# macOS if it's the system /usr/bin/python3).
+# Python for the demos venv. Handlers run shim-free (the shim unsets the
+# preload var before exec), so SIP is irrelevant here and macOS's system
+# python3 would work; brew's is preferred only because it's newer than the
+# 3.9 Apple ships. The core needs no venv at all -- proxy.py is stdlib-only.
 PYTHON ?= $(shell brew --prefix python 2>/dev/null)/bin/python3
 ifeq ($(wildcard $(PYTHON)),)
 PYTHON := python3
 endif
 
-.PHONY: all build install demos-install test clean
+.PHONY: all build install demos-install test hooks clean
 
 all: build
 
@@ -48,6 +49,11 @@ demos-install: install
 	@echo "  start backends:   cd demos && docker compose up -d"
 	@echo "  activate:         jci use demos"
 	@echo "  tour:             demos/scripts/tour.sh   (after activation)"
+
+# Maintainers: point git at the versioned hooks (pre-commit ADR reminder).
+hooks:
+	git config core.hooksPath .githooks
+	@echo "git hooks -> .githooks (pre-commit reminds you to record decisions in docs/adr)"
 
 clean:
 	rm -f lib/intercept.so lib/intercept.dylib

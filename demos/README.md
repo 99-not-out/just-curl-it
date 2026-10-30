@@ -29,9 +29,12 @@ cd demos && docker compose up -d       # bring up backends
 jci use demos                          # activate the env
 ```
 
-`demos-install` uses Homebrew Python by default on macOS (since system
-`/usr/bin/python3` is hardened-runtime and won't load the shim). Override
-with `make demos-install PYTHON=/path/to/python3` if needed.
+`demos-install` prefers Homebrew Python for the venv on macOS, only because
+it's newer than the 3.9 Apple ships. Handlers never load the shim (it's
+unset before they're exec'd), so SIP doesn't apply to them and system
+`/usr/bin/python3` would work too. Override with
+`make demos-install PYTHON=/path/to/python3` if needed. The SIP caveat
+*does* apply to the demo client apps below, which run inside the env.
 
 ## Tour
 

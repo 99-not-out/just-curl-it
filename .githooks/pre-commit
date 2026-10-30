@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Reminder, not a gate: if this commit touches the parts of jci that embody
+# a design decision and no ADR is staged alongside, say so. Install with
+# `make hooks` (sets core.hooksPath to .githooks).
+#
+# Set JCI_ADR_STRICT=1 to make it block instead of warn.
+set -u
+
+staged=$(git diff --cached --name-only --diff-filter=ACMRD)
+[ -n "$staged" ] || exit 0
+
+# Paths whose changes usually mean a decision was made or revisited.
+arch=$(printf '%s\n' "$staged" | grep -E \
+    '^(lib/intercept\.c|lib/build\.sh|lib/helpers\.sh|bin/jci|handlers/|Makefile$|AGENTS\.md$)' \
+    || true)
+adr=$(printf '%s\n' "$staged" | grep -E '^docs/adr/[0-9]{4}-.*\.md$' || true)
+
+[ -n "$arch" ] || exit 0
+[ -z "$adr" ]  || exit 0
+
+cat >&2 <<EOF
+
+  (jci) core files changed, no ADR staged:
+$(printf '%s\n' "$arch" | sed 's/^/        /')
+
+  If this changes *how jci works* (routing, process model, gating, what the
+  core is written in, the handler contract), record it in docs/adr/ -- new
+  file, or supersede the one it contradicts -- and stage it with this commit.
+  Bug fixes and refactors that keep the decisions intact need nothing.
+  See docs/adr/README.md.
+
+EOF
+
+if [ "${JCI_ADR_STRICT-}" = "1" ]; then
+    echo "  JCI_ADR_STRICT=1: refusing commit." >&2
+    exit 1
+fi
+exit 0

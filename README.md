@@ -167,7 +167,10 @@ header_accept = application/vnd.github+json
 ```
 
 No bespoke encryption — the OS keychain (or whatever secret store you
-trust) handles secrets at rest. The proxy is stdlib-only Python.
+trust) handles secrets at rest. The proxy is stdlib-only Python and runs
+under whatever `python3` is on `PATH`, including macOS's system one:
+handlers run with the shim unset, so the SIP caveats elsewhere in this
+README don't apply to them. Nothing in the core needs a venv.
 
 ### Client certificates (mTLS upstreams)
 
@@ -281,6 +284,16 @@ backend without importing a single client library. See `demos/README.md`.
 
 That last row is small but real. Everything else here is convenience and
 aesthetics. But sometimes you just want to curl it!
+
+## Contributing
+
+Design decisions live in `docs/adr/` as short architecture decision
+records — why sentinel IPs, why no daemon, why the method gate is in the
+shim, why the core stays bash + C. If a change contradicts one, supersede
+it; if a change makes a new decision of that kind, add one in the same
+commit. `make hooks` installs a pre-commit reminder that nudges when core
+files change without an ADR alongside. `AGENTS.md` spells the same rules
+out for coding agents.
 
 ## License
 
