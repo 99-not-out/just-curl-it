@@ -16,6 +16,7 @@ edits, no `sudo`, no port-80 fights. Exit the shell and it's all gone.
 jci use demos
 curl http://mylocal.postgres/query?sql=select+now\(\)
 curl http://mylocal.redis/kv/foo --data-binary 'hello' -X PUT
+curl http://mylocal.s3/my-bucket/reports/latest.json      # SigV4-signed on the way out
 ```
 
 ## But why?
@@ -112,11 +113,57 @@ the shim by hand:
 env "$JCI_PRELOAD_VAR=$JCI_LIB" "$JCI_SHELL" -c 'curl -s http://mylocal.hello/'
 ```
 
+## Handlers
+
+jci ships a library of handlers. Each is a directory under
+`handlers/lib/<name>/` with an entrypoint, a README, and (if it needs
+third-party packages) a `requirements.txt`. The library installs inert —
+source only — and each handler costs nothing until you ask for it:
+
+```
+$ jci handler ls
+NAME         STATUS         DEPS                           PURPOSE
+aws-sigv4    ready          -                              Curl an S3 bucket. Or SQS, STS, API Gateway — anything that
+grpc         not installed  grpcio,grpcio-reflection       Call gRPC methods with curl and JSON, no stubs and no .proto
+hello        ready          -                              Echo the routing context as JSON. A bash handler with no dep
+kafka        not installed  confluent-kafka                Produce, peek and tail Kafka topics with curl.
+mongo        not installed  pymongo                        Find, insert and delete MongoDB documents with curl.
+postgres     not installed  psycopg                        SQL over HTTP, plus LISTEN/NOTIFY as a stream.
+proxy        ready          -                              Forward plain HTTP to an authenticated HTTP(S) upstream.
+rabbit       not installed  pika                           RabbitMQ queues as the `stream` shape.
+redis        not installed  redis                          Keys as a `kv` shape, pub/sub channels as a `stream` shape.
+shim-meta    ready          -                              Introspect the active env from inside it.
+smtp         ready          -                              Send mail with a `curl -X POST`. Stdlib only.
+sqlite       ready          -                              Query a SQLite file over HTTP. Stdlib only.
+unix-http    ready          -                              Talk to an HTTP API that lives on a Unix socket — Docker, Po
+```
+
+```sh
+jci handler install kafka          # one venv, just for kafka; `ready` handlers need nothing
+jci handler info kafka             # its README: routes, backends.conf keys, caveats
+jci handler uninstall kafka        # or --all
+```
+
+A route points at a handler by name — `${JCI_HANDLERS}/run kafka` — and a
+handler whose dependencies aren't installed answers with a `503` that
+names the install command, not a traceback. Handlers never load the shim
+(it's unset before they're exec'd), so the macOS SIP caveats don't apply
+to them; `python3` from anywhere works.
+
+Shared plumbing for Python handlers lives in `handlers/lib/jci.py`
+(request parsing including chunked bodies and `100 Continue`, responses,
+SSE, config with `${VAR}` expansion, secret redaction, upstream HTTP). A
+handler is `route(method, path, headers, body)` plus `jci.main(route)`.
+Writing your own: copy the smallest one that resembles what you want
+(`hello` for bash, `sqlite` for Python) and keep the README's four
+sections.
+
 ## Routes
 
 A route line is `<hostname>  [<METHODS>]  <handler-cmd>` — methods optional,
 defaults to all. The handler runs under `/bin/sh -c` with stdin = request,
-stdout = response.
+stdout = response; `${JCI_HANDLERS}/run <name>` is the usual handler-cmd,
+but any command that reads HTTP on stdin and writes it on stdout will do.
 
 ```ini
 # everything allowed
@@ -263,9 +310,11 @@ injection and mTLS upstreams. See `tests/README.md`.
 ## Demos
 
 `make demos-install && cd demos && docker compose up -d` gets you a `demos`
-env with Kafka / Redis / Postgres / Mongo / RabbitMQ / SMTP / gRPC, plus
-walkthrough scripts and demo apps in Python and Java that drive every
-backend without importing a single client library. See `demos/README.md`.
+env with Kafka / Redis / Postgres / Mongo / RabbitMQ / SMTP / gRPC running
+in docker and the matching handlers installed, plus a walkthrough script
+and client apps in Python and Java that drive every backend without
+importing a single client library. `make test-handlers` runs the
+docker-backed handler tests against it. See `demos/README.md`.
 
 ## Doesn't work
 

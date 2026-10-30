@@ -1,6 +1,6 @@
 # 0006. Handlers are an opt-in library with per-handler venvs, managed by `jci handler`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-30
 - Governs: `handlers/run`, `handlers/lib/`, `handlers/lib/jci.py`, `bin/jci` (`handler` subcommand), `Makefile` (`install`, `demos-install`)
 - Amends: ADR 0003 (the "third-party packages belong in `demos/`" clause, and the reading of "never make `jci` need Python")

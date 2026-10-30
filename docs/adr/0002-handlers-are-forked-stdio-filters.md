@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-30 (records a decision made at project start)
-- Governs: `lib/intercept.c` (`spawn_handler_and_connect`), `handlers/`, `demos/handlers/`, `README.md` ("What it's not")
+- Governs: `lib/intercept.c` (`spawn_handler_and_connect`), `handlers/run`, `handlers/lib/`, `README.md` ("What it's not")
 
 ## Context
 
@@ -41,5 +41,7 @@ client has connected, so streaming responses just work.
 - No shared state between requests means no connection pooling to the
   backend either; a handler that needs that should talk to something that
   has it (a local pgbouncer, say) rather than try to become a daemon.
-- Request bodies must be framed by `Content-Length`; chunked request bodies
-  are not currently decoded by the bundled request readers.
+- Request bodies are read in full before the handler acts (there is no
+  streaming request path). Since ADR 0006, `handlers/lib/jci.py` decodes
+  chunked bodies and answers `Expect: 100-continue`; bodies are capped at
+  `JCI_MAX_BODY` (64 MiB default).

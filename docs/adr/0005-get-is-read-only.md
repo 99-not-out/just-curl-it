@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-30
-- Governs: the handler contract; `demos/handlers/postgres.py` as the reference implementation
+- Governs: the handler contract; `handlers/lib/postgres/` and `handlers/lib/sqlite/` as the reference implementations
 
 ## Context
 
@@ -28,9 +28,14 @@ a `GET`-only route never admits.
 
 Where a backend has no such mechanism, the handler must not offer the
 operation on `GET` at all. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
-are reads by construction. RabbitMQ `GET /stream/{q}/peek` is destructive
-(`basic_get` with auto-ack) and is documented as the one leak in the
-unified shape; it should become non-destructive or move off `GET`.
+are reads by construction. RabbitMQ `GET /stream/{q}/peek` was destructive
+(`basic_get` with auto-ack) and documented as the one leak in the unified
+shape; since ADR 0006 it fetches without ack and requeues, and `tail`
+holds messages unacked so the broker requeues them on disconnect. The
+remaining cost — messages held by an open tail are invisible to other
+consumers — is stated in the handler's README. `GET /stream/{q}` still
+declares the queue if absent (idempotent, default arguments); that is the
+one state change a `GET` makes anywhere in the library.
 
 ## Consequences
 

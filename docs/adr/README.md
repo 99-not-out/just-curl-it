@@ -10,10 +10,10 @@ old one `Superseded by NNNN`.
 |---|---|---|
 | [0001](0001-route-on-sentinel-ips.md) | Route on sentinel loopback IPs, not ports | Accepted |
 | [0002](0002-handlers-are-forked-stdio-filters.md) | Handlers are per-request forked stdin/stdout filters; no daemon | Accepted |
-| [0003](0003-core-is-bash-and-c.md) | The core is bash + C; Python appears only as a stdlib-only handler | Accepted |
+| [0003](0003-core-is-bash-and-c.md) | The core is bash + C; Python appears only as a stdlib-only handler | Accepted; amended by 0006 |
 | [0004](0004-method-gate-enforced-in-shim.md) | Method allow-lists are enforced by the shim, not by handlers | Accepted |
 | [0005](0005-get-is-read-only.md) | `GET` must not mutate; handlers enforce it at the backend | Accepted |
-| [0006](0006-handlers-are-an-opt-in-library.md) | Handlers are an opt-in library with per-handler venvs, managed by `jci handler` | Proposed |
+| [0006](0006-handlers-are-an-opt-in-library.md) | Handlers are an opt-in library with per-handler venvs, managed by `jci handler` | Accepted |
 
 ## Writing one
 

@@ -12,11 +12,15 @@ it works.
 | path | what | language |
 |---|---|---|
 | `lib/intercept.c` | the shim: `getaddrinfo`/`connect` interposer, fork, method gate | C |
-| `bin/jci` | `jci ls / use / doctor` — the CLI | bash |
+| `bin/jci` | `jci ls / use / doctor / handler` — the CLI | bash |
 | `lib/helpers.sh` | `jci-run`, `jci-routes`, `jci-info`, sourced into the env | bash |
-| `handlers/` | bundled handlers: `hello.sh`, `proxy.py` (stdlib-only) | bash, Python |
-| `demos/` | optional: docker backends, venv'd protocol handlers, tour, client apps | Python |
-| `tests/run.sh` | the suite — real shim, real curl | bash |
+| `handlers/run` | dispatcher: `run <name>` picks the venv or `python3` and execs the handler | bash |
+| `handlers/lib/jci.py` | shared stdlib plumbing every Python handler imports | Python |
+| `handlers/lib/<name>/` | one handler: `handler.py\|sh`, `README.md`, optional `requirements.txt` | bash, Python |
+| `demos/` | optional: docker backends, the `demos` env, tour, client apps | — |
+| `tests/run.sh` | the suite — real shim, real curl; sources `tests/lib.sh` | bash |
+| `tests/handlers.sh` | docker-backed handler tests (`make test-handlers`) | bash |
+| `tests/unit/` | `unittest` modules for `jci.py` and the SigV4 signer | Python |
 | `docs/adr/` | architecture decision records | — |
 
 ## Decisions are recorded; check them
@@ -32,8 +36,8 @@ contract, read `docs/adr/README.md` and the ADRs it indexes. Then:
   written in, the handler contract, install layout — add an ADR in the
   same commit. Copy `docs/adr/template.md`; keep it under a screen; be as
   honest in Consequences as the README is in "What it's not".
-- Bug fixes, refactors and new demo handlers that leave the decisions
-  intact need no ADR.
+- Bug fixes, refactors and new handlers that follow the directory
+  contract need no ADR.
 
 `.githooks/pre-commit` reminds about this when core files are staged with
 no ADR. If `git config core.hooksPath` is unset in your checkout, run
@@ -42,9 +46,16 @@ no ADR. If `git config core.hooksPath` is unset in your checkout, run
 
 ## Rules the ADRs imply (short form)
 
-- **Core stays bash + C** (ADR 0003). Never make `bin/jci` or
-  `lib/helpers.sh` need Python. Bundled handlers may be Python only if
-  stdlib-only, no venv. Third-party packages live in `demos/`.
+- **Core stays bash + C** (ADR 0003, amended by 0006). jci's own logic is
+  bash; Python is the thing it manages. `jci ls`, `use` and `doctor` must
+  work with no `python3` on `PATH`. `handlers/lib/jci.py` and any handler
+  without a `requirements.txt` are stdlib-only, Python 3.9+.
+- **A handler is a directory** (ADR 0006): `handlers/lib/<name>/` with
+  exactly one of `handler.py` / `handler.sh`, a `README.md` with the four
+  sections (purpose, `## Routes`, `## backends.conf`, `## Notes`), and a
+  `requirements.txt` only if it needs packages. No other manifest. `run`
+  never parses the request; dependencies missing is a `503` naming
+  `jci handler install <name>`, never a traceback.
 - **No daemon** (ADR 0002). Handlers are per-request forked
   stdin/stdout filters. Don't add a long-lived process, a port, or state
   between requests.
@@ -59,18 +70,22 @@ no ADR. If `git config core.hooksPath` is unset in your checkout, run
 ## Building and testing
 
 ```sh
-make build      # compiles lib/intercept.{dylib,so}
-make test       # builds, then tests/run.sh
-make install    # into ~/.just_curl_it
+make build            # compiles lib/intercept.{dylib,so}
+make test             # builds, then tests/run.sh (no docker, no network beyond httpbin, which skips)
+make test-handlers    # tests/handlers.sh against demos/docker-compose.yml; needs `docker compose up -d`
+make install          # into ~/.just_curl_it
+make demos-install    # install + jci handler install for the demos env
 ```
 
 The suite is end-to-end against the real shim with the real curl. On
 macOS it needs Homebrew `curl` and a Homebrew `zsh`/`bash` (SIP strips the
 preload var from `/usr/bin/*` and `/bin/*`); `tests/README.md` lists the
 rest. Run `make test` before claiming anything works; paste the summary
-line. If you change `intercept.c`, compile with `-Wall -Wextra` and keep
-it warning-free. Linux cannot be tested from a Mac — say so when it
-applies rather than implying it was.
+line. If you touched a handler with dependencies, run `make test-handlers`
+too. Don't run the two concurrently: both rebuild the shim. If you change
+`intercept.c`, compile with `-Wall -Wextra` and keep it warning-free.
+Linux cannot be tested from a Mac — say so when it applies rather than
+implying it was.
 
 A handler can be exercised without `jci use` by setting the env the shim
 reads directly:

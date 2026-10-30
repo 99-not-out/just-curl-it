@@ -1,8 +1,8 @@
 # 0003. The core is bash + C; Python appears only as a stdlib-only handler
 
-- Status: Accepted
+- Status: Accepted; amended by 0006
 - Date: 2026-10-30
-- Governs: `bin/jci`, `lib/helpers.sh`, `lib/build.sh`, `lib/intercept.c`, `handlers/proxy.py`, `Makefile`
+- Governs: `bin/jci`, `lib/helpers.sh`, `lib/build.sh`, `lib/intercept.c`, `handlers/run`, `handlers/lib/jci.py`, `Makefile`
 
 ## Context
 
@@ -35,6 +35,12 @@ handlers may be Python provided they are stdlib-only and run under any
 `python3` ≥ 3.8 without a venv. Anything needing third-party packages
 belongs in `demos/` behind its own venv. A curl-based proxy, if written,
 ships alongside `proxy.py` as a second handler, not as a replacement.
+
+*Amended by ADR 0006:* handlers with third-party packages now live in the
+library under `handlers/lib/`, opt-in, one venv each, managed by `jci
+handler`. "Never require Python" is to be read as *jci's own logic is
+bash; Python is the thing it manages* — `jci ls`, `use` and `doctor` work
+with no `python3` on `PATH`. The core-language decision itself stands.
 
 ## Consequences
 
