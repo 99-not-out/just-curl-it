@@ -611,19 +611,24 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header("content-length", "0")
             self.end_headers()
             return
+        n = int(self.headers.get("content-length") or 0)
+        if n:
+            self.rfile.read(n)
         cert = self.connection.getpeercert()
         cn = ""
         for rdn in (cert or {}).get("subject", ()):
             for k, v in rdn:
                 if k == "commonName":
                     cn = v
-        body = json.dumps({"peer_cert": bool(cert), "cn": cn,
+        body = json.dumps({"peer_cert": bool(cert), "cn": cn, "path": self.path,
                            "headers": dict(self.headers)}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    do_PUT = do_GET   # the sigv4 handler test PUTs an object
 
     def log_message(self, *a):
         pass
@@ -696,6 +701,47 @@ header_x-jci-test = present")
             "Location: http://test.mtls/landed" "$(mtls_hdr /redirect)"
         assert_eq "relative Location passes through" \
             "Location: /landed" "$(mtls_hdr /relative)"
+
+        # aws-sigv4 against the same TLS server (needs the client cert too,
+        # since the server demands one): the echo shows what AWS would see.
+        echo "test.s3  $REPO/handlers/run aws-sigv4" >> "$MTLS_DIR/routes.conf"
+        cat > "$MTLS_DIR/s3-backends.conf" <<EOF
+[test.s3]
+upstream    = https://127.0.0.1:$MTLS_PORT
+ca_cert     = $MTLS_DIR/ca.crt
+client_cert = $MTLS_DIR/cli.crt
+client_key  = $MTLS_DIR/cli.key
+region      = us-east-1
+service     = s3
+access_key  = AKIDEXAMPLE
+secret_key  = wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
+EOF
+        s3_curl() {
+            env "$PRELOAD_VAR=$DYLIB" \
+                INTERCEPT_CONFIG="$MTLS_DIR/routes.conf" \
+                INTERCEPT_BACKENDS_CONF="$MTLS_DIR/s3-backends.conf" \
+                JCI_HANDLERS="$REPO/handlers" \
+                "$CURL" -s --max-time 15 -w '\n%{http_code}' "$@"
+        }
+        OUT=$(s3_curl 'http://test.s3/sig/bucket?list-type=2&prefix=a/')
+        assert_eq    "sigv4 GET -> 200"                       "200" "${OUT##*$'\n'}"
+        assert_match "sigv4 Authorization is SigV4 for our key" \
+            '"authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/' "${OUT%$'\n'*}"
+        assert_match "sigv4 signs host, payload hash and date" \
+            'SignedHeaders=host;x-amz-content-sha256;x-amz-date' "${OUT%$'\n'*}"
+        assert_match "sigv4 Host is the upstream authority" \
+            "\"host\": \"127.0.0.1:$MTLS_PORT\"" "${OUT%$'\n'*}"
+        assert_match "sigv4 query reaches upstream intact" \
+            '"path": "/sig/bucket?list-type=2&prefix=a/"' "${OUT%$'\n'*}"
+        # An S3 key with a space arrives percent-encoded (curl refuses a raw
+        # space in a URL), and must reach the upstream exactly that way.
+        OUT=$(s3_curl -X PUT 'http://test.s3/sig/bucket/my%20key.txt' --data-binary 'hello')
+        assert_eq    "sigv4 PUT -> 200"                       "200" "${OUT##*$'\n'}"
+        assert_match "sigv4 payload hash is sha256(body)" \
+            '"x-amz-content-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"' \
+            "${OUT%$'\n'*}"
+        assert_match "sigv4 PUT path keeps its encoding on the wire" \
+            '"path": "/sig/bucket/my%20key.txt"' "${OUT%$'\n'*}"
 
         OUT=$(mtls_get "# no client cert configured")
         assert_eq    "no client cert -> 502"    "502" "${OUT##*$'\n'}"
