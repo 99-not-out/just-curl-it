@@ -48,7 +48,8 @@ curl -s -X POST http://aws.bedrock/model/anthropic.claude-opus-5-5/converse \
 - Listing models is a different service and host:
   `bedrock.<region>.amazonaws.com` with `service = bedrock` — give it its
   own route if you want it.
-- The `llm` handler on the roadmap normalises Anthropic / OpenAI / Bedrock
-  behind one text-in, text-out shape; this recipe is the raw API.
+- The **`llm` handler** with `provider = bedrock` uses the Converse API
+  behind the same text-in/text-out and `/chat` shapes as Anthropic and
+  OpenAI; this recipe is the raw API.
 
 *Not run live from this repo; the SigV4 signer is covered by the AWS test vectors.*

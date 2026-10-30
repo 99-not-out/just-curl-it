@@ -728,6 +728,185 @@ assert_match "athena wrong secret names the signature"       'signature' "${RESP
 kill "$ATH_PID" 2>/dev/null; wait "$ATH_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+section "handler: llm"
+
+# One fake server playing three providers by path: Anthropic (/v1/messages,
+# x-api-key), OpenAI (/v1/chat/completions, Bearer) and Bedrock Converse
+# (/model/{id}/converse, SigV4 verified with jci_aws). A user message
+# containing ECHO is echoed back so prompts can be asserted.
+cat > "$TMPDIR/llmserver.py" <<'PYEOF'
+import datetime, http.server, json, re, sys
+sys.path.insert(0, sys.argv[1]); import jci_aws
+CREDS = jci_aws.Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", None)
+def last_user(msgs):
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):
+                return "".join(p.get("text", "") for p in c)
+            return c or ""
+    return ""
+def reply_text(provider, msgs):
+    u = last_user(msgs)
+    return ("echo:" + u) if "ECHO" in u else f"hello from {provider}"
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj, extra=None):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/json")
+        for k, v in (extra or {}).items(): self.send_header(k, v)
+        self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def _sse(self, events):
+        self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
+        for name, data in events:
+            if name: self.wfile.write(f"event: {name}\n".encode())
+            self.wfile.write(f"data: {data}\n\n".encode()); self.wfile.flush()
+    def do_GET(self):
+        if self.path == "/v1/models":
+            if self.headers.get("x-api-key") == "k-ant":
+                return self._send(200, {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-haiku-5-5"}]})
+            if self.headers.get("authorization") == "Bearer k-oai":
+                return self._send(200, {"data": [{"id": "gpt-x"}, {"id": "gpt-y"}]})
+            return self._send(401, {"error": {"message": "bad key"}})
+        return self._send(404, {"error": "nope"})
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0); raw = self.rfile.read(n); req = json.loads(raw or b"{}")
+        if self.path == "/v1/messages":
+            if self.headers.get("x-api-key") != "k-ant":
+                return self._send(401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+            if not self.headers.get("anthropic-version"):
+                return self._send(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "anthropic-version header is required"}})
+            text = reply_text("anthropic", req.get("messages", []))
+            if req.get("stream"):
+                return self._sse([("message_start", json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 5}}})),
+                                  ("content_block_delta", json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": text[:3]}})),
+                                  ("content_block_delta", json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": text[3:]}})),
+                                  ("message_delta", json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}})),
+                                  ("message_stop", json.dumps({"type": "message_stop"}))])
+            return self._send(200, {"content": [{"type": "text", "text": text}], "model": req.get("model"), "stop_reason": "end_turn",
+                                    "usage": {"input_tokens": 5, "output_tokens": 7}}, {"x-test-max-tokens": str(req.get("max_tokens")), "x-test-system": req.get("system") or ""})
+        if self.path == "/v1/chat/completions":
+            if self.headers.get("authorization") != "Bearer k-oai":
+                return self._send(401, {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+            text = reply_text("openai", req.get("messages", []))
+            if req.get("stream"):
+                return self._sse([(None, json.dumps({"choices": [{"delta": {"content": text[:3]}}]})),
+                                  (None, json.dumps({"choices": [{"delta": {"content": text[3:]}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 4, "completion_tokens": 6}})),
+                                  (None, "[DONE]")])
+            return self._send(200, {"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], "model": req.get("model"),
+                                    "usage": {"prompt_tokens": 4, "completion_tokens": 6}})
+        m = re.fullmatch(r"/model/([^/]+)/converse", self.path)
+        if m:
+            authz = self.headers.get("authorization", "")
+            mm = re.search(r"SignedHeaders=([^,]+), Signature=([0-9a-f]+)", authz)
+            if not mm:
+                return self._send(403, {"message": "Missing Authentication Token"})
+            signed = {h: self.headers.get(h, "") for h in mm.group(1).split(";")}
+            now = datetime.datetime.strptime(self.headers["x-amz-date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+            creq, sh = jci_aws.canonical_request("POST", self.path, "", signed, raw, "bedrock")
+            sts = jci_aws.string_to_sign(now, "eu-west-1", "bedrock", creq)
+            if jci_aws.authorization(CREDS, now, "eu-west-1", "bedrock", sh, sts) != authz:
+                return self._send(403, {"message": "The request signature we calculated does not match the signature you provided."})
+            text = reply_text("bedrock", req.get("messages", []))
+            return self._send(200, {"output": {"message": {"role": "assistant", "content": [{"text": text}]}}, "stopReason": "end_turn",
+                                    "usage": {"inputTokens": 3, "outputTokens": 8}})
+        return self._send(404, {"error": "nope " + self.path})
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+mkfifo "$TMPDIR/llmport"
+"${PY:-python3}" "$TMPDIR/llmserver.py" "$REPO/handlers/lib" > "$TMPDIR/llmport" 2>"$TMPDIR/llmserver.err" &
+LLM_PID=$!
+read -r LLM_PORT < "$TMPDIR/llmport"
+cat > "$TMPDIR/llm.conf" <<EOF
+test.ant     $REPO/handlers/run llm
+test.oai     $REPO/handlers/run llm
+test.bed     $REPO/handlers/run llm
+test.antbad  $REPO/handlers/run llm
+EOF
+cat > "$TMPDIR/llm-backends.conf" <<EOF
+[test.ant]
+provider    = anthropic
+upstream    = http://127.0.0.1:$LLM_PORT
+model       = claude-opus-5-5
+api_key_cmd = printf k-ant
+max_tokens  = 512
+system      = You are terse.
+prompt_tldr = Three bullets, then stop:
+[test.oai]
+provider   = openai
+upstream   = http://127.0.0.1:$LLM_PORT
+model      = gpt-x
+api_key    = k-oai
+[test.bed]
+provider   = bedrock
+upstream   = http://127.0.0.1:$LLM_PORT
+model      = anthropic.claude-opus-5-5
+region     = eu-west-1
+access_key = AKIDEXAMPLE
+secret_key = wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
+[test.antbad]
+provider   = anthropic
+upstream   = http://127.0.0.1:$LLM_PORT
+model      = claude-opus-5-5
+api_key    = wrong
+EOF
+llm_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/llm.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/llm-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 30 -w '\n%{http_code}' "$@"
+}
+# anthropic
+RESP=$(llm_curl -X POST http://test.ant/chat -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_eq    "llm anthropic POST /chat -> 200"               "200" "${RESP##*$'\n'}"
+assert_match "llm anthropic text"                            '"text": "hello from anthropic"' "${RESP%$'\n'*}"
+assert_match "llm anthropic usage normalised"                '"usage": {"input": 5, "output": 7}' "${RESP%$'\n'*}"
+assert_match "llm anthropic provider+model reported"         '"provider": "anthropic"' "${RESP%$'\n'*}"
+RESP=$(llm_curl -X POST http://test.ant/chat -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":99999}')
+assert_match "llm max_tokens is capped by config"            '"maxTokens": 512' "${RESP%$'\n'*}"
+RESP=$(llm_curl -X POST http://test.ant/summarize -H 'content-type: text/plain' --data-binary 'ECHO the quick brown fox')
+assert_eq    "llm verb /summarize -> 200"                    "200" "${RESP##*$'\n'}"
+assert_match "llm verb prompt carries the instruction"       'ummar' "${RESP%$'\n'*}"
+assert_match "llm verb prompt carries the text"              'the quick brown fox' "${RESP%$'\n'*}"
+RESP=$(llm_curl -i -X POST http://test.ant/summarize --data-binary 'plain words')
+assert_match "llm verb answers text/plain"                   'Content-Type: text/plain' "$RESP"
+RESP=$(llm_curl -X POST http://test.ant/tldr --data-binary 'ECHO stuff')
+assert_match "llm custom verb from prompt_tldr"              'Three bullets, then stop:' "${RESP%$'\n'*}"
+RESP=$(llm_curl -X POST 'http://test.ant/translate?to=German' --data-binary 'ECHO hello')
+assert_match "llm /translate?to= reaches the prompt"         'German' "${RESP%$'\n'*}"
+RESP=$(llm_curl -N -X POST http://test.ant/chat/stream -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_match "llm anthropic stream is SSE deltas"            'data: {"text": "hel"}' "${RESP%$'\n'*}"
+assert_match "llm anthropic stream ends with done + usage"   'event: done' "${RESP%$'\n'*}"
+assert_match "llm anthropic stream done carries output tokens" '"output": 7' "${RESP%$'\n'*}"
+RESP=$(llm_curl http://test.ant/models)
+assert_match "llm anthropic GET /models"                     '"claude-haiku-5-5"' "${RESP%$'\n'*}"
+RESP=$(llm_curl -X POST http://test.ant/chat -H 'content-type: application/json' -d '{"messages":[]}')
+assert_eq    "llm POST /chat without messages -> 400"        "400" "${RESP##*$'\n'}"
+RESP=$(llm_curl -X POST http://test.ant/nosuchverb --data-binary 'x')
+assert_eq    "llm unknown verb -> 404"                       "404" "${RESP##*$'\n'}"
+RESP=$(llm_curl -X POST http://test.antbad/chat -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_eq    "llm bad key -> 502"                            "502" "${RESP##*$'\n'}"
+assert_match "llm bad key carries the provider message"      'invalid x-api-key' "${RESP%$'\n'*}"
+# openai
+RESP=$(llm_curl -X POST http://test.oai/chat -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_match "llm openai text"                               '"text": "hello from openai"' "${RESP%$'\n'*}"
+assert_match "llm openai usage normalised"                   '"usage": {"input": 4, "output": 6}' "${RESP%$'\n'*}"
+RESP=$(llm_curl -N -X POST http://test.oai/chat/stream -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_match "llm openai stream is SSE deltas"               'data: {"text": "hel"}' "${RESP%$'\n'*}"
+assert_match "llm openai stream ends with done"              'event: done' "${RESP%$'\n'*}"
+RESP=$(llm_curl http://test.oai/models)
+assert_match "llm openai GET /models"                        '"gpt-y"' "${RESP%$'\n'*}"
+# bedrock (converse, SigV4 verified by the fake)
+RESP=$(llm_curl -X POST http://test.bed/chat -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_eq    "llm bedrock POST /chat -> 200 (signature verified)" "200" "${RESP##*$'\n'}"
+assert_match "llm bedrock text"                              '"text": "hello from bedrock"' "${RESP%$'\n'*}"
+assert_match "llm bedrock usage normalised"                  '"usage": {"input": 3, "output": 8}' "${RESP%$'\n'*}"
+RESP=$(llm_curl -N -X POST http://test.bed/chat/stream -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+assert_match "llm bedrock stream falls back to one chunk"    'data: {"text": "hello from bedrock"}' "${RESP%$'\n'*}"
+kill "$LLM_PID" 2>/dev/null; wait "$LLM_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF

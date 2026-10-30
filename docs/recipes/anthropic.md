@@ -58,9 +58,10 @@ what your key can use.
 - Everything in the shell that talks to `llm.anthropic` gets the key: an
   agent you start inside `jci use` never sees `ANTHROPIC_API_KEY`, only the
   hostname. That's the sandbox story applied to the model call itself.
-- The `llm` handler on the roadmap adds a provider-neutral text-in,
-  text-out shape (`cat notes.md | curl --data-binary @- http://mylocal.llm/summarize`)
-  on top of this.
+- This recipe is the raw Messages API. For the curl-shaped version —
+  `cat notes.md | curl --data-binary @- http://mylocal.llm/summarize`, a
+  normalised `/chat`, a `max_tokens` cap — use the **`llm` handler** with
+  `provider = anthropic` (`jci handler info llm`).
 - Parse responses with `jq`, never `grep` — content is JSON with escapes.
 
 *Not run live from this repo.*

@@ -1,6 +1,7 @@
 # just curl it
 
-> Talk to Kafka, Postgres, Redis, Mongo, RabbitMQ, gRPC and SMTP with plain `curl`.
+> Talk to Kafka, Postgres, MySQL, ClickHouse, BigQuery, Athena, Redis, Mongo,
+> RabbitMQ, MQTT, gRPC, GraphQL, S3, SMTP — and an LLM — with plain `curl`.
 > No client library. No SDK. No server. **Just curl it.**
 
 An `LD_PRELOAD` shim hijacks HTTP calls to a set of fake hostnames and pipes them
@@ -123,20 +124,33 @@ source only — and each handler costs nothing until you ask for it:
 ```
 $ jci handler ls
 NAME         STATUS         DEPS                           PURPOSE
+athena       ready          -                              SQL over HTTP for Amazon Athena — the shared `query` shape
 aws-sigv4    ready          -                              Curl an S3 bucket. Or SQS, STS, API Gateway — anything that
+bigquery     ready          -                              SQL over HTTP for Google BigQuery — the shared `query` shape
+clickhouse   ready          -                              SQL over HTTP for ClickHouse — the `query` shape shared with
+graphql      ready          -                              Any GraphQL API — Linear, GitHub, Shopify, Hasura, your own
 grpc         not installed  grpcio,grpcio-reflection       Call gRPC methods with curl and JSON, no stubs and no .proto
 hello        ready          -                              Echo the routing context as JSON. A bash handler with no dep
-kafka        not installed  confluent-kafka                Produce, peek and tail Kafka topics with curl.
-mongo        not installed  pymongo                        Find, insert and delete MongoDB documents with curl.
+kafka        not installed  confluent-kafka                Produce, peek and tail Kafka topics with curl. The `stream`
+llm          ready          -                              Talk to a model with curl, in shapes that fit a pipeline: te
+mongo        not installed  pymongo                        Find, insert and delete MongoDB documents with curl. Filters
+mqtt         not installed  paho-mqtt                      Publish and subscribe to MQTT topics with curl. The `stream`
+mysql        not installed  pymysql                        SQL over HTTP for MySQL and MariaDB — the same `query` shape
 postgres     not installed  psycopg                        SQL over HTTP, plus LISTEN/NOTIFY as a stream.
-proxy        ready          -                              Forward plain HTTP to an authenticated HTTP(S) upstream.
-rabbit       not installed  pika                           RabbitMQ queues as the `stream` shape.
+proxy        ready          -                              Forward plain HTTP to an authenticated HTTP(S) upstream. The
+rabbit       not installed  pika                           RabbitMQ queues as the `stream` shape — the same routes as K
 redis        not installed  redis                          Keys as a `kv` shape, pub/sub channels as a `stream` shape.
-shim-meta    ready          -                              Introspect the active env from inside it.
-smtp         ready          -                              Send mail with a `curl -X POST`. Stdlib only.
-sqlite       ready          -                              Query a SQLite file over HTTP. Stdlib only.
+shim-meta    ready          -                              Introspect the active env from inside it: the route table th
+smtp         ready          -                              Send mail with a `curl -X POST`. Stdlib only, nothing to ins
+sqlite       ready          -                              Query a SQLite file over HTTP. Stdlib only, nothing to insta
 unix-http    ready          -                              Talk to an HTTP API that lives on a Unix socket — Docker, Po
 ```
+
+Three shapes recur, so a script written for one backend works on its
+siblings: `query` (postgres, mysql, sqlite, clickhouse, bigquery, athena —
+`GET /query?sql=` is read-only, `POST /query` may write), `stream` (kafka,
+rabbit, mqtt, redis pub/sub — `POST /stream/{name}`, `GET /stream/{name}/tail`
+as SSE, `/peek` where the backend can replay) and `kv` (redis — `/kv/{key}`).
 
 ```sh
 jci handler install kafka          # one venv, just for kafka; `ready` handlers need nothing

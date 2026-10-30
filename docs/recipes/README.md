@@ -23,8 +23,8 @@ CLI session can read, and nothing in that shell — you, a script, an agent
 | [GCP](gcp.md) — any Google API, BigQuery raw, Vertex AI (Claude) | proxy | `gcloud auth print-access-token` |
 | [Azure](azure.md) | proxy | `az account get-access-token` |
 | [AWS Bedrock](aws-bedrock.md) — Claude and other models, SigV4 | aws-sigv4 | AWS credentials / profile / `aws configure export-credentials` |
-| [Anthropic API](anthropic.md) | proxy | API key in the keychain, or `ant auth` OAuth |
-| [OpenAI API](openai.md) | proxy | API key in the keychain |
+| [Anthropic API](anthropic.md) | proxy (raw) — or the `llm` handler | API key in the keychain, or `ant auth` OAuth |
+| [OpenAI API](openai.md) | proxy (raw) — or the `llm` handler | API key in the keychain |
 | [Vault](vault.md) | proxy | `vault print token` |
 | [Kubernetes](kubernetes.md) | proxy | `kubectl create token` or the kubeconfig |
 | [Prometheus](prometheus.md) | proxy | none, or basic auth |
