@@ -188,8 +188,180 @@ cmd_doctor() {
             "$sh" -c 'true' 2>&1 | sed 's/^/  /' || true
     fi
 
+    if [ -d "$HANDLER_LIB" ]; then
+        echo "handlers:"
+        local d name st
+        for d in "$HANDLER_LIB"/*/; do
+            is_handler_dir "$d" || continue
+            name=$(basename "$d")
+            handler_needs_venv "$d" || continue
+            st=$(handler_status "$name")
+            case "$st" in
+                installed) echo "  handler $name: installed ($("$HANDLER_VENVS/$name/bin/python" --version 2>&1))" ;;
+                broken)    echo "  handler $name: broken -- $("$HANDLER_VENVS/$name/bin/python" -c "import $(handler_probe_module "$d")" 2>&1 | tail -1)" ;;
+                *)         echo "  handler $name: $st -- jci handler install $name" ;;
+            esac
+        done
+    fi
+
     echo "envs:"
     cmd_ls 2>/dev/null | sed 's/^/  /' || true
+}
+
+# ---------------------------------------------------------------------------
+# jci handler -- the handler library (ADR 0006).
+#
+# A handler is $HANDLERS_DIR/lib/<name>/ with handler.py|handler.sh, a
+# README.md, and optionally a requirements.txt. A non-empty requirements.txt
+# means it needs a venv, created at $HANDLERS_DIR/venv/<name>/ on install.
+# jci's own logic is bash; python is only the thing being managed here, so
+# ls/use/doctor keep working with no python3 on PATH.
+
+HANDLER_LIB="$HANDLERS_DIR/lib"
+HANDLER_VENVS="$HANDLERS_DIR/venv"
+
+handler_dir() { echo "$HANDLER_LIB/$1"; }
+
+# A directory is a handler only if it has an entrypoint; __pycache__ isn't.
+is_handler_dir() { [ -f "$1/handler.py" ] || [ -f "$1/handler.sh" ]; }
+
+# 0 if requirements.txt has a line that isn't blank or a comment.
+handler_needs_venv() {
+    [ -f "$1/requirements.txt" ] && \
+        grep -qE '^[[:space:]]*[^[:space:]#]' "$1/requirements.txt"
+}
+
+# Requirement names, comma-joined, specs and extras stripped; "-" if none.
+handler_deps() {
+    local names
+    names=$(grep -vE '^[[:space:]]*(#|$)' "$1/requirements.txt" 2>/dev/null \
+            | sed -E 's/[[:space:]]*(\[.*\])?[<>=!~;].*$//; s/[[:space:]]+$//' \
+            | paste -sd, -)
+    echo "${names:--}"
+}
+
+# Module to import to prove the venv works: a `# import: X` comment on line 1
+# of requirements.txt, else the first requirement, lowercased, '-' -> '_'.
+handler_probe_module() {
+    local first
+    first=$(head -1 "$1/requirements.txt" 2>/dev/null)
+    case "$first" in
+        \#*import:*) echo "${first#*import:}" | tr -d '[:space:]'; return ;;
+    esac
+    handler_deps "$1" | cut -d, -f1 | sed -E 's/\[.*\]//' | tr 'A-Z-' 'a-z_'
+}
+
+handler_purpose() {  # first non-blank, non-heading README line, <= 60 chars
+    awk 'NF && !/^#/ { print; exit }' "$1/README.md" 2>/dev/null | cut -c1-60
+}
+
+# ready | installed | not installed | broken | unknown | missing
+handler_status() {
+    local dir; dir=$(handler_dir "$1")
+    is_handler_dir "$dir" || { echo "missing"; return; }
+    handler_needs_venv "$dir" || { echo "ready"; return; }
+    local py="$HANDLER_VENVS/$1/bin/python"
+    if [ ! -x "$py" ]; then
+        command -v python3 >/dev/null 2>&1 && echo "not installed" || echo "unknown"
+        return
+    fi
+    local mod; mod=$(handler_probe_module "$dir")
+    if "$py" -c "import $mod" >/dev/null 2>&1; then echo "installed"; else echo "broken"; fi
+}
+
+# Interpreter for creating venvs: $JCI_PYTHON, else brew's (newer than the
+# 3.9 Apple ships), else whatever python3 is on PATH. Handlers never load
+# the shim, so SIP doesn't come into it. Refuses < 3.9.
+pick_python() {
+    local py=""
+    if [ -n "${JCI_PYTHON-}" ]; then
+        py="$JCI_PYTHON"
+    elif command -v brew >/dev/null 2>&1; then
+        local p; p=$(brew --prefix python 2>/dev/null)/bin/python3
+        [ -x "$p" ] && py="$p"
+    fi
+    [ -n "$py" ] || py=$(command -v python3 2>/dev/null || true)
+    [ -n "$py" ] || { echo "jci: no python3 found (needed to create handler venvs)" >&2; return 1; }
+    if ! "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+        echo "jci: python3 >= 3.9 required (found $("$py" --version 2>&1) at $py)" >&2
+        return 1
+    fi
+    echo "$py"
+}
+
+handler_ls() {
+    [ -d "$HANDLER_LIB" ] || { echo "no handler library at $HANDLER_LIB (run: make install)" >&2; return 1; }
+    printf '%-12s %-14s %-30s %s\n' NAME STATUS DEPS PURPOSE
+    local d name
+    for d in "$HANDLER_LIB"/*/; do
+        is_handler_dir "$d" || continue
+        name=$(basename "$d")
+        printf '%-12s %-14s %-30s %s\n' "$name" "$(handler_status "$name")" \
+            "$(handler_deps "$d")" "$(handler_purpose "$d")"
+    done
+}
+
+handler_info() {
+    local name="${1:-}"
+    [ -n "$name" ] || { echo "usage: jci handler info <name>" >&2; return 2; }
+    local dir; dir=$(handler_dir "$name")
+    is_handler_dir "$dir" || { echo "jci: no such handler: $name (try: jci handler ls)" >&2; return 1; }
+    if [ -f "$dir/README.md" ]; then cat "$dir/README.md"; else echo "(no README.md for $name)"; fi
+    echo
+    echo "status: $(handler_status "$name")"
+    echo "route:  <hostname>  \${JCI_HANDLERS}/run $name"
+}
+
+handler_install() {
+    [ $# -gt 0 ] || { echo "usage: jci handler install <name>..." >&2; return 2; }
+    local name dir venv py rc=0
+    for name in "$@"; do
+        dir=$(handler_dir "$name")
+        if ! is_handler_dir "$dir"; then
+            echo "jci: no such handler: $name (try: jci handler ls)" >&2; rc=1; continue
+        fi
+        if ! handler_needs_venv "$dir"; then
+            echo "$name: ready (no dependencies)"; continue
+        fi
+        venv="$HANDLER_VENVS/$name"
+        py=$(pick_python) || { rc=1; continue; }
+        mkdir -p "$HANDLER_VENVS"
+        if [ ! -x "$venv/bin/python" ]; then
+            "$py" -m venv "$venv" || { echo "jci: venv creation failed for $name" >&2; rm -rf "$venv"; rc=1; continue; }
+        fi
+        if "$venv/bin/pip" install --quiet --disable-pip-version-check -r "$dir/requirements.txt"; then
+            echo "$name: installed ($("$venv/bin/python" --version 2>&1))"
+        else
+            echo "jci: pip install failed for $name; removing $venv" >&2
+            rm -rf "$venv"; rc=1
+        fi
+    done
+    return $rc
+}
+
+handler_uninstall() {
+    [ $# -gt 0 ] || { echo "usage: jci handler uninstall <name>... | --all" >&2; return 2; }
+    if [ "$1" = "--all" ]; then
+        rm -rf "$HANDLER_VENVS"; echo "removed all handler venvs"; return
+    fi
+    local name
+    for name in "$@"; do
+        if [ -d "$HANDLER_VENVS/$name" ]; then
+            rm -rf "$HANDLER_VENVS/$name"; echo "$name: uninstalled"
+        else
+            echo "$name: nothing installed"
+        fi
+    done
+}
+
+cmd_handler() {
+    case "${1-}" in
+        ls)        shift; handler_ls "$@" ;;
+        info)      shift; handler_info "$@" ;;
+        install)   shift; handler_install "$@" ;;
+        uninstall) shift; handler_uninstall "$@" ;;
+        *) echo "usage: jci handler ls | info <name> | install <name>... | uninstall <name>...|--all" >&2; exit 2 ;;
+    esac
 }
 
 usage() {
@@ -197,14 +369,20 @@ usage() {
 jci -- per-shell HTTP -> protocol shim
 
 Usage:
-  jci ls               list envs
-  jci use <env>        launch a subshell with <env> active
-  jci doctor           preflight checks (especially useful on macOS)
+  jci ls                          list envs
+  jci use <env>                   launch a subshell with <env> active
+  jci doctor                      preflight checks (especially useful on macOS)
+  jci handler ls                  the handler library and what's installed
+  jci handler info <name>         a handler's README, routes and config keys
+  jci handler install <name>...   create its venv and install its dependencies
+  jci handler uninstall <name>... remove the venv (--all for every handler)
 
 Layout:
   $JCI_HOME/
     lib/intercept.{so,dylib}
-    handlers/...
+    handlers/run                  dispatcher: routes say \${JCI_HANDLERS}/run <name>
+    handlers/lib/<name>/          handler.py|.sh, README.md, requirements.txt
+    handlers/venv/<name>/         created by 'jci handler install'
     envs/<name>/{routes,backends}.conf
 EOF
 }
@@ -213,6 +391,7 @@ case "${1-}" in
     ls)               shift; cmd_ls "$@" ;;
     use)              shift; cmd_use "$@" ;;
     doctor)           shift; cmd_doctor "$@" ;;
+    handler)          shift; cmd_handler "$@" ;;
     ""|help|-h|--help) usage ;;
     *) echo "jci: unknown command: $1" >&2; usage >&2; exit 2 ;;
 esac

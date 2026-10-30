@@ -29,10 +29,10 @@ respond() {  # <status> <reason> <json-body>
     exit 0
 }
 
-available() {
+available() {  # dirs with an entrypoint; __pycache__ and the like are not handlers
     local d names=""
     for d in "$LIB"/*/; do
-        [ -d "$d" ] || continue
+        [ -f "$d/handler.py" ] || [ -f "$d/handler.sh" ] || continue
         names="$names${names:+,}\"$(basename "$d")\""
     done
     printf '[%s]' "$names"

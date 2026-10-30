@@ -46,6 +46,7 @@ bad()     { FAIL=$((FAIL+1)); FAILURES+=("$1"); printf '  \033[31m✗\033[0m %s\
 
 assert_eq()    { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected '$2', got '$3'"; }
 assert_match() { [[ "$3" == *"$2"* ]] && ok "$1" || bad "$1" "expected to contain '$2'; got '$3'"; }
+assert_no_match() { [[ "$3" != *"$2"* ]] && ok "$1" || bad "$1" "expected NOT to contain '$2'; got '$3'"; }
 
 # ---------------------------------------------------------------------------
 section "build"
@@ -132,6 +133,10 @@ RESP=$(run_curl -w '\n%{http_code}' http://test.nope/)
 assert_eq    "unknown handler -> 404"             "404" "${RESP##*$'\n'}"
 assert_match "404 lists available handlers"       '"available"' "${RESP%$'\n'*}"
 assert_match "404 list includes hello"            'hello' "${RESP%$'\n'*}"
+mkdir -p "$HCOPY/lib/__pycache__" "$HCOPY/lib/notahandler"   # dirs with no entrypoint
+RESP=$(run_curl http://test.nope/)
+assert_no_match "404 list skips dirs without an entrypoint" 'notahandler' "$RESP"
+assert_no_match "404 list skips __pycache__"                '__pycache__' "$RESP"
 RESP=$(run_curl -w '\n%{http_code}' http://test.evil/)
 assert_eq    "path-traversal name -> 404"         "404" "${RESP##*$'\n'}"
 assert_match "traversal names the problem"        'invalid handler name' "${RESP%$'\n'*}"
@@ -139,6 +144,87 @@ RESP=$(run_curl -i http://test.needs/)
 assert_match "deps without venv -> 503"           'HTTP/1.1 503' "$RESP"
 assert_match "503 names the install command"      'jci handler install needsdeps' "$RESP"
 assert_match "503 is from jci-run"                'X-Handled-By: jci-run' "$RESP"
+
+# ---------------------------------------------------------------------------
+section "jci handler"
+
+# A throwaway JCI_HOME with the library copied in, plus a fixture handler
+# that depends on a tiny pure-Python package we build as a wheel right here,
+# so `jci handler install` is exercised with no network (PIP_NO_INDEX).
+JH="$TMPDIR/home"
+mkdir -p "$JH/handlers" "$TMPDIR/wheels"
+cp -R "$REPO/handlers/lib" "$JH/handlers/lib"
+cp "$REPO/handlers/run" "$JH/handlers/run"
+mkdir -p "$JH/handlers/lib/withdeps"
+cat > "$JH/handlers/lib/withdeps/handler.py" <<'PYEOF'
+import jcitestpkg
+import jci
+def route(method, path, headers, body):
+    jci.send_json(200, {"imported": jcitestpkg.__name__})
+if __name__ == "__main__":
+    jci.main(route)
+PYEOF
+printf 'jcitestpkg\n' > "$JH/handlers/lib/withdeps/requirements.txt"
+printf '# withdeps\n\nFixture handler that needs a package.\n' > "$JH/handlers/lib/withdeps/README.md"
+"${PY:-python3}" - "$TMPDIR/wheels" <<'PYEOF'
+import sys, zipfile, hashlib, base64, os
+out = os.path.join(sys.argv[1], "jcitestpkg-0.1-py3-none-any.whl")
+files = {
+    "jcitestpkg/__init__.py": b"__version__ = '0.1'\n",
+    "jcitestpkg-0.1.dist-info/METADATA": b"Metadata-Version: 2.1\nName: jcitestpkg\nVersion: 0.1\n",
+    "jcitestpkg-0.1.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: jci-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+}
+def rec(name, data):
+    h = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+    return f"{name},sha256={h},{len(data)}\n"
+record = "".join(rec(n, d) for n, d in files.items()) + "jcitestpkg-0.1.dist-info/RECORD,,\n"
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for n, d in files.items():
+        z.writestr(n, d)
+    z.writestr("jcitestpkg-0.1.dist-info/RECORD", record)
+PYEOF
+
+mkdir -p "$JH/handlers/lib/__pycache__" "$JH/handlers/lib/notahandler"   # not handlers
+jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
+LS=$(jh handler ls 2>&1)
+assert_no_match "ls skips dirs without an entrypoint" "notahandler" "$LS"
+assert_no_match "ls skips __pycache__"                "__pycache__" "$LS"
+assert_match "ls shows hello ready"            "hello        ready"          "$LS"
+assert_match "ls shows withdeps not installed" "withdeps     not installed" "$LS"
+assert_match "ls shows deps column"            "jcitestpkg"                 "$LS"
+assert_match "info prints the README"          "## backends.conf"           "$(jh handler info proxy 2>&1)"
+
+INST=$(PIP_NO_INDEX=1 PIP_FIND_LINKS="$TMPDIR/wheels" jh handler install withdeps 2>&1); RC=$?
+[ $RC -eq 0 ] && ok "install withdeps exits 0" || bad "install withdeps exits 0" "$INST"
+[ -x "$JH/handlers/venv/withdeps/bin/python" ] && ok "install created the venv" || bad "install created the venv"
+assert_match "ls shows withdeps installed"     "withdeps     installed"     "$(jh handler ls 2>&1)"
+
+cat > "$TMPDIR/wd.conf" <<EOF
+test.wd   $JH/handlers/run withdeps
+EOF
+wd_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/wd.conf" \
+        INTERCEPT_BACKENDS_CONF=/dev/null JCI_HANDLERS="$JH/handlers" \
+        "$CURL" -s -w '\n%{http_code}' http://test.wd/
+}
+RESP=$(wd_curl)
+assert_eq    "installed handler runs under its venv -> 200" "200" "${RESP##*$'\n'}"
+assert_match "handler imported the package"    '"imported": "jcitestpkg"' "${RESP%$'\n'*}"
+
+OUT=$(jh handler install hello 2>&1)
+assert_match "install of stdlib handler says ready" "ready (no dependencies)" "$OUT"
+[ ! -e "$JH/handlers/venv/hello" ] && ok "no venv created for stdlib handler" || bad "venv wrongly created for hello"
+
+jh handler uninstall withdeps >/dev/null 2>&1
+[ ! -e "$JH/handlers/venv/withdeps" ] && ok "uninstall removed the venv" || bad "uninstall left the venv"
+assert_match "ls shows withdeps not installed again" "withdeps     not installed" "$(jh handler ls 2>&1)"
+RESP=$(wd_curl)
+assert_eq    "uninstalled handler -> 503"      "503" "${RESP##*$'\n'}"
+
+OUT=$(jh handler install nosuch 2>&1); RC=$?
+[ $RC -ne 0 ] && ok "install nosuch exits non-zero" || bad "install nosuch exits non-zero"
+assert_match "install nosuch names the problem" "no such handler" "$OUT"
+assert_match "doctor lists venv handlers"      "handler withdeps:" "$(jh doctor 2>&1)"
 
 # ---------------------------------------------------------------------------
 section "method permissions"
