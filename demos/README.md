@@ -17,6 +17,7 @@ this directory is the backends and the examples of using them.
 | `mylocal.clickhouse` | `clickhouse` | ClickHouse (HTTP) | 8123       |
 | `mylocal.mqtt`     | `mqtt`      | Mosquitto        | 1883         |
 | `mylocal.memcached` | `memcached` | memcached       | 11211        |
+| `mylocal.ldap`     | `ldap`      | OpenLDAP         | 1389 (host)  |
 | `mylocal.mongo`    | `mongo`     | MongoDB          | 27017        |
 | `mylocal.rabbit`   | `rabbit`    | RabbitMQ + mgmt  | 5672 / 15672 |
 | `mylocal.smtp`     | `smtp`      | SMTP (MailHog)   | 1025 / 8025  |
@@ -31,7 +32,7 @@ inside the env prints them all.
 
 ```sh
 # from the repo root
-make demos-install                     # make install + jci handler install kafka redis postgres mysql mongo rabbit grpc mqtt
+make demos-install                     # make install + jci handler install kafka redis postgres mysql mongo rabbit grpc mqtt ldap
 cd demos && docker compose up -d       # bring up backends
 jci use demos                          # activate the env
 ```

@@ -40,7 +40,7 @@ install: build
 	@echo "add to PATH:  export PATH=\"$(JCI_HOME)/bin:\$$PATH\""
 	@echo "then try:     jci handler ls      (and 'make demos-install' for a ready-made env)"
 
-DEMO_HANDLERS = kafka redis postgres mysql mongo rabbit grpc mqtt
+DEMO_HANDLERS = kafka redis postgres mysql mongo rabbit grpc mqtt ldap
 
 demos-install: install
 	@echo "Installing handlers for the demos env: $(DEMO_HANDLERS)"

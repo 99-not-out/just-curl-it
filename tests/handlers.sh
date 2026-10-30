@@ -27,7 +27,7 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit mqtt memcached; do
+for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit mqtt memcached ldap; do
     echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
 done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
@@ -260,6 +260,54 @@ if install_or_skip memcached memcached; then
     assert_eq    "memcached key with a space -> 400"          "400" "$(code "$OUT")"
     OUT=$(hcurl "http://mylocal.memcached/stats")
     assert_match "memcached GET /stats"                       '"curr_items"' "$(body "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "ldap"
+if install_or_skip ldap ldap; then
+    # Seed the base, an OU and a person; idempotent (duplicates are ignored;
+    # -c continues past them so later entries still load).
+    $COMPOSE exec -T ldap ldapadd -c -x -H ldap://127.0.0.1 -D cn=admin,dc=example,dc=org -w admin >/dev/null 2>&1 <<'LDIF' || true
+dn: dc=example,dc=org
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: jci demo
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: uid=ada,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: ada
+cn: Ada Lovelace
+sn: Lovelace
+givenName: Ada
+mail: ada@example.org
+title: Analyst
+LDIF
+    OUT=$(hcurl -G http://mylocal.ldap/search --data-urlencode 'filter=(uid=ada)')
+    assert_eq    "ldap GET /search -> 200"                    "200" "$(code "$OUT")"
+    assert_match "ldap /search returns the dn"                '"dn": "uid=ada,ou=people,dc=example,dc=org"' "$(body "$OUT")"
+    assert_match "ldap /search returns attributes"            '"mail": "ada@example.org"' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.ldap/search --data-urlencode 'filter=(objectClass=inetOrgPerson)' --data-urlencode 'attrs=cn,mail')
+    assert_match "ldap /search attrs= limits attributes"     '"cn": "Ada Lovelace"' "$(body "$OUT")"
+    assert_no_match "ldap /search attrs= drops the rest"      '"title"' "$(body "$OUT")"
+    OUT=$(hcurl http://mylocal.ldap/find/ada)
+    assert_match "ldap /find/{term} matches uid/cn/mail"      'Ada Lovelace' "$(body "$OUT")"
+    OUT=$(hcurl 'http://mylocal.ldap/find/love*')
+    assert_match "ldap /find escapes but allows a trailing *" 'Ada Lovelace' "$(body "$OUT")"
+    OUT=$(hcurl 'http://mylocal.ldap/entry/uid=ada,ou=people,dc=example,dc=org')
+    assert_match "ldap /entry/{dn} returns the entry"         '"sn": "Lovelace"' "$(body "$OUT")"
+    OUT=$(hcurl 'http://mylocal.ldap/entry/uid=nobody,ou=people,dc=example,dc=org')
+    assert_eq    "ldap /entry unknown dn -> 404"              "404" "$(code "$OUT")"
+    OUT=$(hcurl http://mylocal.ldap/whoami)
+    assert_match "ldap /whoami reports the bind identity"     'cn=admin,dc=example,dc=org' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.ldap/search --data-urlencode 'filter=(uid=ada')
+    assert_eq    "ldap bad filter -> 400"                     "400" "$(code "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.ldap/search -d 'x')
+    assert_eq    "ldap POST on the GET-only demo route -> 405" "405" "$(code "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

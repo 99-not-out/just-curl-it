@@ -74,6 +74,22 @@ services:
       retries: 20
     ports: ["11211:11211"]
 
+  ldap:
+    image: osixia/openldap:1.5.0
+    environment:
+      LDAP_ORGANISATION: "jci demo"
+      LDAP_DOMAIN: "example.org"
+      LDAP_ADMIN_PASSWORD: "admin"
+    healthcheck:
+      # rootDSE search: proves slapd answers, regardless of what's been loaded
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://127.0.0.1 -b '' -s base >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    # 1389 on the host: 389 is privileged and often taken by directory tooling.
+    ports: ["1389:389"]
+
   redis:
     image: redis:7-alpine
     healthcheck:
