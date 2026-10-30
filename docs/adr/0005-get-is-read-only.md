@@ -27,7 +27,12 @@ go through `POST` (or `PUT`/`DELETE` where the shape calls for it), which
 a `GET`-only route never admits.
 
 Where a backend has no such mechanism, the handler must not offer the
-operation on `GET` at all. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
+operation on `GET` at all. One deliberate exception to "never inspect the
+request": the `graphql` handler reads a document's top-level operation
+keyword and refuses `mutation`/`subscription` on `GET`. That keyword is
+the protocol's own declaration of intent (a `query` that writes is a
+server bug no client can detect), not a heuristic over what the body
+does, so it counts as the backend's classification. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
 are reads by construction. RabbitMQ `GET /stream/{q}/peek` was destructive
 (`basic_get` with auto-ack) and documented as the one leak in the unified
 shape; since ADR 0006 it fetches without ack and requeues, and `tail`

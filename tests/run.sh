@@ -331,6 +331,116 @@ assert_match "unix-http non-socket path named"        'plain.file' "${RESP%$'\n'
 kill "$UX_PID" 2>/dev/null; wait "$UX_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+section "handler: graphql"
+
+# A fake GraphQL endpoint: answers introspection with a two-type schema,
+# `hello` and `setHello`, and echoes what it received under extensions.
+cat > "$TMPDIR/gqlserver.py" <<'PYEOF'
+import http.server, json, sys
+SCHEMA = {"queryType": {"name": "Query"}, "mutationType": {"name": "Mutation"}, "subscriptionType": None,
+  "types": [
+    {"kind": "OBJECT", "name": "Query", "description": "root", "fields": [
+        {"name": "hello", "description": "greets", "args": [
+            {"name": "name", "type": {"kind": "SCALAR", "name": "String", "ofType": None}}],
+         "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "String", "ofType": None}}}],
+     "inputFields": None, "enumValues": None, "interfaces": []},
+    {"kind": "OBJECT", "name": "Mutation", "description": None, "fields": [
+        {"name": "setHello", "description": None, "args": [
+            {"name": "v", "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "String", "ofType": None}}}],
+         "type": {"kind": "SCALAR", "name": "String", "ofType": None}}],
+     "inputFields": None, "enumValues": None, "interfaces": []},
+    {"kind": "SCALAR", "name": "String", "description": "text", "fields": None, "inputFields": None, "enumValues": None, "interfaces": None},
+    {"kind": "OBJECT", "name": "__Schema", "description": "meta", "fields": [], "inputFields": None, "enumValues": None, "interfaces": []},
+  ]}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0)
+        raw = self.rfile.read(n)
+        ct = self.headers.get("content-type", "")
+        if "json" in ct:
+            req = json.loads(raw)
+        else:
+            req = {"query": raw.decode(), "variables": None, "operationName": None, "raw_content_type": ct}
+        q = req.get("query") or ""
+        if "__schema" in q:
+            data = {"__schema": SCHEMA}
+        elif "__type" in q:
+            name = (req.get("variables") or {}).get("n")
+            data = {"__type": next((t for t in SCHEMA["types"] if t["name"] == name), None)}
+        elif "setHello" in q:
+            data = {"setHello": "ok"}
+        else:
+            data = {"hello": "world"}
+        body = json.dumps({"data": data, "extensions": {"received": {
+            "query": q, "variables": req.get("variables"), "operationName": req.get("operationName"),
+            "headers": {k.lower(): v for k, v in self.headers.items()}}}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+mkfifo "$TMPDIR/gqlport"
+"${PY:-python3}" "$TMPDIR/gqlserver.py" > "$TMPDIR/gqlport" 2>"$TMPDIR/gqlserver.err" &
+GQL_PID=$!
+read -r GQL_PORT < "$TMPDIR/gqlport"
+
+cat > "$TMPDIR/gql.conf" <<EOF
+test.gql      $REPO/handlers/run graphql
+test.gqlro    GET   $REPO/handlers/run graphql
+EOF
+cat > "$TMPDIR/gql-backends.conf" <<EOF
+[test.gql]
+upstream       = http://127.0.0.1:$GQL_PORT/graphql
+header_x-token = t1
+[test.gqlro]
+upstream       = http://127.0.0.1:$GQL_PORT/graphql
+header_x-token = t1
+EOF
+gql_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/gql.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/gql-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 10 -w '\n%{http_code}' "$@"
+}
+RESP=$(gql_curl -G http://test.gql/gql --data-urlencode 'query={ hello }')
+assert_eq    "graphql GET /gql -> 200"                       "200" "${RESP##*$'\n'}"
+assert_match "graphql GET /gql returns data"                 '"hello": "world"' "${RESP%$'\n'*}"
+assert_match "graphql configured header reached upstream"    '"x-token": "t1"' "${RESP%$'\n'*}"
+RESP=$(gql_curl -G http://test.gql/gql --data-urlencode 'query=query A($n: String) { hello(name: $n) } mutation B { setHello(v: "x") }' \
+       --data-urlencode 'vars={"n":"ada"}' --data-urlencode 'op=A')
+assert_eq    "graphql GET with vars+op -> 200"               "200" "${RESP##*$'\n'}"
+assert_match "graphql variables forwarded"                   '"variables": {"n": "ada"}' "${RESP%$'\n'*}"
+assert_match "graphql operationName forwarded"               '"operationName": "A"' "${RESP%$'\n'*}"
+RESP=$(gql_curl -G http://test.gql/gql --data-urlencode 'query=mutation { setHello(v: "x") }')
+assert_eq    "graphql GET mutation -> 405 (even on an open route)" "405" "${RESP##*$'\n'}"
+assert_match "graphql GET mutation points at POST"           '"allow": ["POST"]' "${RESP%$'\n'*}"
+RESP=$(gql_curl -X POST http://test.gql/gql -H 'content-type: application/json' \
+       -d '{"query":"mutation { setHello(v: \"x\") }"}')
+assert_eq    "graphql POST mutation -> 200"                  "200" "${RESP##*$'\n'}"
+assert_match "graphql POST mutation ran"                     '"setHello": "ok"' "${RESP%$'\n'*}"
+RESP=$(gql_curl -X POST http://test.gql/gql -H 'content-type: application/graphql' -d '{ hello }')
+assert_match "graphql POST raw document is wrapped as JSON"  '"query": "{ hello }"' "${RESP%$'\n'*}"
+RESP=$(gql_curl -X POST http://test.gqlro/gql -d '{"query":"mutation { setHello(v: \"x\") }"}')
+assert_eq    "graphql POST on GET-only route -> 405 from the shim" "405" "${RESP##*$'\n'}"
+RESP=$(gql_curl http://test.gql/schema)
+assert_eq    "graphql GET /schema -> 200"                    "200" "${RESP##*$'\n'}"
+assert_match "graphql /schema names the query type"          '"queryType": "Query"' "${RESP%$'\n'*}"
+assert_match "graphql /schema lists Mutation"                '"Mutation"' "${RESP%$'\n'*}"
+assert_no_match "graphql /schema hides __ types"             '__Schema' "${RESP%$'\n'*}"
+RESP=$(gql_curl http://test.gql/types/Query)
+assert_match "graphql /types/Query renders field type"       '"type": "String!"' "${RESP%$'\n'*}"
+assert_match "graphql /types/Query renders args"             '"name": "name"' "${RESP%$'\n'*}"
+RESP=$(gql_curl http://test.gql/types/Nope)
+assert_eq    "graphql /types/Nope -> 404"                    "404" "${RESP##*$'\n'}"
+RESP=$(gql_curl http://test.gql/gql)
+assert_eq    "graphql GET /gql without query -> 400"         "400" "${RESP##*$'\n'}"
+kill "$GQL_PID" 2>/dev/null; wait "$GQL_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF

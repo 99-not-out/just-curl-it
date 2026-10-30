@@ -37,9 +37,10 @@ curl -s http://gh.api/repos/99-not-out/just-curl-it/issues -d '{"title":"from cu
 
 - `gh auth token` prints the token for the current `gh` login; with
   multiple accounts, `gh auth token -u <user>`.
-- GitHub's GraphQL endpoint is `POST /graphql` on the same host; it works
-  through this route if you allow `POST` (every GraphQL call is a POST, so
-  `GET`-only blocks it entirely — the `graphql` handler fixes that).
+- GitHub's GraphQL endpoint is `POST /graphql` on the same host; through
+  this REST route it needs `POST` allowed. For queries on `GET` and schema
+  discovery, give it its own hostname on the `graphql` handler with
+  `upstream = https://api.github.com/graphql` and the same `authorization_cmd`.
 - Rate-limit headers come back unchanged: `curl -si ... | grep -i x-ratelimit`.
 
 *Run live through the shim as written: `GET /user` → 200, `POST` → 405 from the gate.*

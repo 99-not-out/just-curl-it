@@ -1,7 +1,7 @@
 # Recipes
 
 Services that are already HTTP need no handler of their own — the `proxy`,
-`aws-sigv4` and (soon) `graphql` handlers cover them. What they need is the
+`aws-sigv4` and `graphql` handlers cover them. What they need is the
 right `backends.conf` block and three example curls. That's a recipe.
 
 Each page is a complete env: copy the two config files into
@@ -28,7 +28,7 @@ CLI session can read, and nothing in that shell — you, a script, an agent
 | [Vault](vault.md) | proxy | `vault print token` |
 | [Kubernetes](kubernetes.md) | proxy | `kubectl create token` or the kubeconfig |
 | [Prometheus](prometheus.md) | proxy | none, or basic auth |
-| [Linear](linear.md) (GraphQL) | proxy | API key in the keychain |
+| [Linear](linear.md) (GraphQL) | graphql | API key in the keychain |
 | [Slite](slite.md) | proxy | API key in the keychain |
 | [Slack](slack.md) | proxy | bot/user token in the keychain |
 | [Jira Cloud](jira.md) | proxy | email + API token, Basic |
