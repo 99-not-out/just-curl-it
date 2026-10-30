@@ -123,10 +123,10 @@ stdout = response.
 mylocal.kafka       ${JCI_HANDLERS}/run-handler kafka
 
 # only GET; POST/PUT/DELETE return 405
-mylocal.prod-db     GET             ${JCI_HANDLERS}/run-handler postgres
+mylocal.prod-db     GET             ${JCI_HANDLERS}/run postgres
 
 # read + write, no delete
-mylocal.api         GET,POST,PUT    ${JCI_HANDLERS}/proxy.py
+mylocal.api         GET,POST,PUT    ${JCI_HANDLERS}/run proxy
 ```
 
 The allow-list is enforced by the shim itself, before the handler is
@@ -144,7 +144,7 @@ own backend.
 
 ## Auth proxy
 
-`handlers/proxy.py` forwards plain HTTP to an HTTPS upstream with an
+The `proxy` handler forwards plain HTTP to an HTTPS upstream with an
 `Authorization` header injected — your shell history says `curl http://gh.api/...`
 instead of pasting tokens into every command. Auth comes from one of:
 
@@ -198,10 +198,15 @@ unlinked as soon as the TLS context has loaded it. The two keys must be set
 together, and a path that doesn't exist is reported as such, since the usual
 cause is a login session that has quietly expired.
 
-Handlers can reuse all of this: `proxy.py` exposes `load_backend`,
-`upstream_target`, `connect_upstream` and `inject_headers`, so a
-protocol-specific handler reaches an authenticated upstream without
-reimplementing auth resolution or TLS setup.
+Redirects stay inside the shim: a `Location` header pointing back at the
+upstream is rewritten onto the intercepted hostname, so `curl -L` follows
+it through the proxy instead of escaping to the real host without auth.
+
+Handlers can reuse all of this: `handlers/lib/jci.py` exposes
+`load_backend`, `upstream_target`, `connect_upstream`, `inject_headers`
+and `forward_response`, so a protocol-specific handler reaches an
+authenticated upstream without reimplementing auth resolution or TLS
+setup. The `proxy` handler itself is forty lines of glue over them.
 
 **Scope reminder:** once `jci use gh-api` is active, every libc-using tool
 in that shell that hits `gh.api` goes through the proxy — `curl`, `gh`,

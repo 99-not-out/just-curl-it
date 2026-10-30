@@ -338,7 +338,7 @@ hb_reachable() {
 
 if hb_reachable; then
     cat > "$TMPDIR/proxy_routes.conf"   <<EOF
-test.hb  $REPO/handlers/proxy.py
+test.hb  $REPO/handlers/run proxy
 EOF
     cat > "$TMPDIR/proxy_backends.conf" <<EOF
 [test.hb]
@@ -409,6 +409,16 @@ import http.server, json, ssl, sys
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ("/redirect", "/relative"):
+            # Absolute Location on our own origin (proxy must rewrite it),
+            # or a relative one (proxy must leave it alone).
+            host = self.headers.get("Host", "")
+            loc = f"https://{host}/landed" if self.path == "/redirect" else "/landed"
+            self.send_response(302)
+            self.send_header("Location", loc)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
         cert = self.connection.getpeercert()
         cn = ""
         for rdn in (cert or {}).get("subject", ()):
@@ -450,7 +460,7 @@ PYEOF
     else
         ok "mtls server listening on $MTLS_PORT"
 
-        echo "test.mtls  $REPO/handlers/proxy.py" > "$MTLS_DIR/routes.conf"
+        echo "test.mtls  $REPO/handlers/run proxy" > "$MTLS_DIR/routes.conf"
 
         # $1 = extra backends.conf lines; echoes "<body>\n<status>"
         mtls_get() {
@@ -478,6 +488,22 @@ header_x-jci-test = present")
         assert_match "Authorization injected"   'Bearer test-mtls-suite' "${OUT%$'\n'*}"
         assert_match "extra header injected"    '"present"'         "${OUT%$'\n'*}"
         assert_match "Host points at upstream"  '127.0.0.1'         "${OUT%$'\n'*}"
+
+        # Location rewrite: an upstream-origin absolute URL comes back on the
+        # intercepted host so `curl -L` stays inside the shim; a relative one
+        # passes through untouched.
+        mtls_hdr() {  # <path> -> the Location header line, CR stripped
+            env "$PRELOAD_VAR=$DYLIB" \
+                INTERCEPT_CONFIG="$MTLS_DIR/routes.conf" \
+                INTERCEPT_BACKENDS_CONF="$MTLS_DIR/backends.conf" \
+                JCI_HANDLERS="$REPO/handlers" \
+                "$CURL" -s -i --max-time 15 "http://test.mtls$1" \
+                | tr -d '\r' | grep -i '^location:'
+        }
+        assert_eq "absolute Location rewritten to intercepted host" \
+            "Location: http://test.mtls/landed" "$(mtls_hdr /redirect)"
+        assert_eq "relative Location passes through" \
+            "Location: /landed" "$(mtls_hdr /relative)"
 
         OUT=$(mtls_get "# no client cert configured")
         assert_eq    "no client cert -> 502"    "502" "${OUT##*$'\n'}"
