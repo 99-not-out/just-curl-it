@@ -90,6 +90,7 @@ cmd_use() {
     local var; var=$(preload_var)
 
     export "$var=$lib"
+    export JCI_HOME
     export INTERCEPT_CONFIG="$env_dir/routes.conf"
     export INTERCEPT_BACKENDS_CONF="$env_dir/backends.conf"
     export JCI_HANDLERS="$HANDLERS_DIR"

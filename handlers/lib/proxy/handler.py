@@ -15,7 +15,18 @@ import ssl
 import jci
 
 
+ROUTES = [
+    "GET  /_info",
+    "<any method> <any path>     forwarded to <upstream><path> with auth injected",
+]
+
+
 def route(method: str, path: str, headers: dict, body: bytes) -> None:
+    # /_info is jci's, not the upstream's: with `openapi =` in the config it
+    # becomes the upstream's operation menu. An upstream path literally
+    # named /_info is unreachable through this handler; that's the trade.
+    if method == "GET" and path.split("?", 1)[0] == "/_info":
+        return jci.info("proxy", ROUTES)
     cfg = jci.load_backend()
     u = jci.upstream_target(cfg)
     # Host must carry a non-default port, or an upstream on :8443 builds its

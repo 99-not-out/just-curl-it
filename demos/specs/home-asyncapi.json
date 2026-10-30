@@ -1,0 +1,43 @@
+{
+  "asyncapi": "2.6.0",
+  "info": {
+    "title": "Home sensors (demo)",
+    "version": "1.0.0",
+    "description": "A small AsyncAPI document the demos env points the mqtt handler at, so GET /_info shows channels instead of a bare route list."
+  },
+  "servers": {
+    "demo": { "url": "mqtt://localhost:1883", "protocol": "mqtt" }
+  },
+  "channels": {
+    "home/{room}/temperature": {
+      "description": "Periodic temperature readings per room (retained).",
+      "parameters": { "room": { "schema": { "type": "string" } } },
+      "publish": {
+        "message": {
+          "name": "TemperatureReading",
+          "payload": {
+            "type": "object",
+            "properties": {
+              "celsius": { "type": "number" },
+              "at": { "type": "string", "format": "date-time" }
+            },
+            "required": ["celsius"]
+          }
+        }
+      }
+    },
+    "home/{room}/light": {
+      "description": "Light state commands.",
+      "subscribe": {
+        "message": {
+          "name": "LightCommand",
+          "payload": { "type": "string", "enum": ["on", "off"] }
+        }
+      }
+    },
+    "home/alerts": {
+      "description": "Free-text alerts for the household.",
+      "publish": { "message": { "name": "Alert", "payload": { "type": "string" } } }
+    }
+  }
+}

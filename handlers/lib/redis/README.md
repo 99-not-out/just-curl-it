@@ -34,6 +34,10 @@ password = ${REDIS_PASSWORD} # optional
 tls      = false             # true -> TLS; pair with ca_cert for a private CA
 ca_cert  = /path/ca.pem
 timeout  = 5                 # connect timeout, seconds
+
+# Optional: an AsyncAPI document (path or URL; JSON, or YAML with PyYAML in
+# this handler's venv) turns GET /_info into a channel menu with example curls.
+# asyncapi = ~/specs/events.json
 ```
 
 ## Notes

@@ -277,13 +277,192 @@ def redact(cfg: dict) -> dict:
 
 
 def info(shape, routes: list[str]) -> None:
-    """The standard GET /_info body."""
+    """The standard GET /_info body. With `openapi =` or `asyncapi =` in the
+    backend config, an `api` section renders the spec into the menu."""
+    body = {"handler": HANDLER, "shape": shape, "routes": routes, "host": HOST}
     try:
-        backend = redact(load_backend())
+        cfg = load_backend()
+        body["backend"] = redact(cfg)
     except Exception as e:  # /_info must always answer
-        backend = {"error": str(e)}
-    send_json(200, {"handler": HANDLER, "shape": shape, "routes": routes,
-                    "host": HOST, "backend": backend})
+        body["backend"] = {"error": str(e)}
+        cfg = {}
+    try:
+        if cfg.get("openapi"):
+            body["api"] = openapi_menu(load_spec(cfg["openapi"]), HOST)
+        elif cfg.get("asyncapi"):
+            body["api"] = asyncapi_menu(load_spec(cfg["asyncapi"]), HOST)
+    except Exception as e:
+        body["api"] = {"error": str(e)}
+    send_json(200, body)
+
+
+# ---------------------------------------------------------------------------
+# API specs -> /_info menus
+
+def load_spec(ref: str) -> dict:
+    """An OpenAPI or AsyncAPI document from a path or http(s) URL. JSON needs
+    nothing; YAML needs PyYAML in the handler's environment."""
+    ref = ref.strip()
+    try:
+        if ref.startswith(("http://", "https://")):
+            import urllib.request
+            with urllib.request.urlopen(ref, timeout=10) as r:
+                raw = r.read()
+        else:
+            with open(os.path.expanduser(ref), "rb") as f:
+                raw = f.read()
+    except OSError as e:
+        raise BackendConfigError(f"spec not readable: {ref} ({e})") from None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        raise BackendConfigError(
+            f"spec {ref} is not JSON; reading YAML needs PyYAML in this handler's "
+            f"venv (add it to requirements.txt) or convert the spec to JSON") from None
+    try:
+        doc = yaml.safe_load(raw)
+    except Exception as e:
+        raise BackendConfigError(f"spec {ref}: {e}") from None
+    if not isinstance(doc, dict):
+        raise BackendConfigError(f"spec {ref} is not a document")
+    return doc
+
+
+def schema_summary(schema):
+    """{"celsius": "number", "at": "string (date-time)"} for an object schema,
+    the type name for a scalar."""
+    if not isinstance(schema, dict):
+        return "?"
+    t = schema.get("type")
+    if t == "object" or "properties" in schema:
+        return {k: schema_summary(v) for k, v in (schema.get("properties") or {}).items()}
+    if t == "array":
+        return [schema_summary(schema.get("items", {}))]
+    if "enum" in schema:
+        return "enum " + "|".join(str(v) for v in schema["enum"])
+    if t and schema.get("format"):
+        return f"{t} ({schema['format']})"
+    return t or ("$ref " + schema["$ref"].rsplit("/", 1)[-1] if "$ref" in schema else "?")
+
+
+def schema_example(schema, depth: int = 0):
+    """A placeholder value shaped like the schema, for an example curl."""
+    if not isinstance(schema, dict) or depth > 3:
+        return None
+    if "example" in schema:
+        return schema["example"]
+    if "enum" in schema and schema["enum"]:
+        return schema["enum"][0]
+    t = schema.get("type")
+    if t == "object" or "properties" in schema:
+        return {k: schema_example(v, depth + 1) for k, v in (schema.get("properties") or {}).items()}
+    if t == "array":
+        return [schema_example(schema.get("items", {}), depth + 1)]
+    return {"string": "string", "integer": 0, "number": 0, "boolean": False}.get(t or "", None)
+
+
+def _curl(method: str, host: str, path: str, body=None) -> str:
+    cmd = "curl" if method == "GET" else f"curl -X {method}"
+    data = ""
+    if body is not None:
+        data = " -H 'content-type: application/json' -d '" + json.dumps(body) + "'"
+    return f"{cmd} http://{host}{path}{data}"
+
+
+def openapi_menu(spec: dict, host: str) -> dict:
+    """{"title","version","servers","operations":[{method,path,summary,query,curl}]}
+    from an OpenAPI 3.x (or Swagger 2) document, sorted by path then method."""
+    info_ = spec.get("info") or {}
+    ops = []
+    for path, item in (spec.get("paths") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        for method, op in item.items():
+            if method.lower() not in ("get", "post", "put", "patch", "delete", "head", "options"):
+                continue
+            if not isinstance(op, dict):
+                continue
+            params = (item.get("parameters") or []) + (op.get("parameters") or [])
+            query = [p.get("name") for p in params if isinstance(p, dict) and p.get("in") == "query"]
+            entry = {"method": method.upper(), "path": path,
+                     "summary": op.get("summary") or op.get("operationId") or op.get("description", "")}
+            if query:
+                entry["query"] = query
+            body = None
+            content = ((op.get("requestBody") or {}).get("content") or {})
+            js = content.get("application/json") or next(iter(content.values()), None) if content else None
+            if isinstance(js, dict) and js.get("schema"):
+                body = schema_example(js["schema"])
+                entry["body"] = schema_summary(js["schema"])
+            entry["curl"] = _curl(entry["method"], host, path, body)
+            ops.append(entry)
+    ops.sort(key=lambda o: (o["path"], o["method"]))
+    out = {"spec": "openapi", "title": info_.get("title", ""), "version": str(info_.get("version", "")),
+           "operations": ops}
+    if spec.get("servers"):
+        out["servers"] = [s.get("url") for s in spec["servers"] if isinstance(s, dict)]
+    return out
+
+
+def asyncapi_menu(spec: dict, host: str) -> dict:
+    """{"title","version","channels":[{channel,description,message,payload,curl}]}
+    from an AsyncAPI 2.x or 3.x document, mapped onto the stream shape."""
+    info_ = spec.get("info") or {}
+    v3 = str(spec.get("asyncapi", "")).startswith("3")
+    chans = []
+    for key, ch in (spec.get("channels") or {}).items():
+        if not isinstance(ch, dict):
+            continue
+        name = ch.get("address") or key if v3 else key
+        entry = {"channel": name}
+        if ch.get("description"):
+            entry["description"] = ch["description"]
+        msgs: list[dict] = []
+        operations: list[str] = []
+        if v3:
+            for mname, m in (ch.get("messages") or {}).items():
+                if isinstance(m, dict):
+                    msgs.append({"name": m.get("name") or mname, **m})
+            for op in (spec.get("operations") or {}).values():
+                ref = ((op or {}).get("channel") or {}).get("$ref", "")
+                if ref.rsplit("/", 1)[-1] == key and op.get("action"):
+                    operations.append(op["action"])
+        else:
+            for kind in ("publish", "subscribe"):
+                op = ch.get(kind)
+                if isinstance(op, dict):
+                    operations.append(kind)
+                    m = op.get("message") or {}
+                    for one in (m.get("oneOf") or [m]):
+                        if isinstance(one, dict):
+                            msgs.append(one)
+        if operations:
+            entry["operations"] = operations
+        if msgs:
+            first = msgs[0]
+            entry["message"] = first.get("name") or first.get("title") or "message"
+            payload = first.get("payload")
+            if payload is not None:
+                entry["payload"] = schema_summary(payload)
+        example = schema_example(msgs[0].get("payload")) if msgs and msgs[0].get("payload") else None
+        if isinstance(example, (dict, list)):
+            publish = f"curl -X POST http://{host}/stream/{name} -H 'content-type: application/json' -d '{json.dumps(example)}'"
+        else:
+            publish = f"curl -X POST http://{host}/stream/{name} -d '{example if example is not None else 'payload'}'"
+        entry["curl"] = [publish, f"curl -N http://{host}/stream/{name}/tail"]
+        chans.append(entry)
+    chans.sort(key=lambda c: c["channel"])
+    out = {"spec": "asyncapi", "title": info_.get("title", ""), "version": str(info_.get("version", "")),
+           "channels": chans}
+    servers = spec.get("servers") or {}
+    if servers:
+        out["servers"] = [f"{s.get('protocol', '?')}://{s.get('host') or s.get('url', '')}"
+                          if v3 else s.get("url", "") for s in servers.values() if isinstance(s, dict)]
+    return out
 
 
 # ---------------------------------------------------------------------------

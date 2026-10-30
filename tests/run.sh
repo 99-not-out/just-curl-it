@@ -441,6 +441,42 @@ assert_eq    "graphql GET /gql without query -> 400"         "400" "${RESP##*$'\
 kill "$GQL_PID" 2>/dev/null; wait "$GQL_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+section "spec-aware /_info"
+
+# `openapi =` on a proxy route turns /_info into the upstream's operation
+# menu; nothing contacts the upstream for that.
+cat > "$TMPDIR/pets.json" <<'EOF'
+{"openapi":"3.0.3","info":{"title":"Pets","version":"1"},
+ "paths":{"/pets":{"get":{"summary":"List pets"},"post":{"summary":"Create a pet"}},
+          "/pets/{id}":{"get":{"summary":"One pet"}}}}
+EOF
+cat > "$TMPDIR/spec.conf" <<EOF
+test.pets      $REPO/handlers/run proxy
+test.badspec   $REPO/handlers/run proxy
+EOF
+cat > "$TMPDIR/spec-backends.conf" <<EOF
+[test.pets]
+upstream = http://127.0.0.1:1
+openapi  = $TMPDIR/pets.json
+[test.badspec]
+upstream = http://127.0.0.1:1
+openapi  = $TMPDIR/does-not-exist.json
+EOF
+spec_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/spec.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/spec-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 10 -w '\n%{http_code}' "$@"
+}
+RESP=$(spec_curl http://test.pets/_info)
+assert_eq    "openapi /_info -> 200"                         "200" "${RESP##*$'\n'}"
+assert_match "openapi /_info carries the spec title"         '"title": "Pets"' "${RESP%$'\n'*}"
+assert_match "openapi /_info lists an operation"             '"summary": "Create a pet"' "${RESP%$'\n'*}"
+assert_match "openapi /_info gives an example curl on our host" 'curl http://test.pets/pets/{id}' "${RESP%$'\n'*}"
+RESP=$(spec_curl http://test.badspec/_info)
+assert_eq    "missing spec: /_info still answers 200"        "200" "${RESP##*$'\n'}"
+assert_match "missing spec is reported in the api section"   'does-not-exist.json' "${RESP%$'\n'*}"
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF

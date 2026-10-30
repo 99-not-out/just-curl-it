@@ -44,10 +44,19 @@ client_key_cmd  = tsh apps config --format=key
 ca_cert         = /path/ca.pem             # replaces the system trust store
 
 timeout = 5                                # connect timeout, seconds
+
+# Optional: an OpenAPI document (path or URL; JSON, or YAML with PyYAML)
+# turns GET /_info into the upstream's operation menu with example curls.
+openapi = https://api.github.com/openapi.json
 ```
 
 ## Notes
 
+- `GET /_info` is answered here, not forwarded — so an upstream path
+  literally named `/_info` is unreachable through this handler. With
+  `openapi =` set, `/_info` lists every operation in the spec as
+  `{method, path, summary, query, body, curl}` on *this* hostname, which
+  is what `jci-info` shows an agent landing in the env.
 - Errors name the cause: cert without key, a cert path that no longer
   exists (an expired login session is the usual reason), an unexpanded
   `${VAR}`, an expired client cert, and a chain lacking SKI/AKI extensions

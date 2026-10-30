@@ -29,6 +29,10 @@ GET    /_info
 url      = amqps://app:${RABBIT_PASSWORD}@mq.example:5671/%2Fprod   # pika URL; amqps for TLS
 mgmt_url = https://app:${RABBIT_PASSWORD}@mq.example:15671          # for GET /streams only
 timeout  = 5
+
+# Optional: an AsyncAPI document (path or URL; JSON, or YAML with PyYAML in
+# this handler's venv) turns GET /_info into a channel menu with example curls.
+# asyncapi = ~/specs/events.json
 ```
 
 ## Notes

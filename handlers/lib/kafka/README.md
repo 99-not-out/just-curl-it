@@ -30,6 +30,10 @@ GET    /_info
 bootstrap         = broker1:9092,broker2:9092      # required
 timeout           = 5                              # socket.timeout.ms = timeout*1000
 
+# Optional: an AsyncAPI document (path or URL; JSON, or YAML with PyYAML in
+# this handler's venv) turns GET /_info into a channel menu with example curls.
+# asyncapi = ~/specs/events.json
+
 # Friendly names for the common auth settings:
 security_protocol = SASL_SSL
 sasl_mechanism    = SCRAM-SHA-512

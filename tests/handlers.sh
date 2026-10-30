@@ -39,9 +39,13 @@ printf '\n[mylocal.postgres-ro]\ndsn = %s\n' \
     >> "$TMPDIR/backends.conf"
 BACKENDS="$TMPDIR/backends.conf"
 
+# The demo env refers to ${JCI_HOME}/envs/demos/*.json for API specs, as
+# `make demos-install` lays them out; mirror that in the throwaway home.
+mkdir -p "$JH/envs/demos" && cp "$REPO"/demos/specs/*.json "$JH/envs/demos/"
+
 hcurl() {
     env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$ROUTES" INTERCEPT_BACKENDS_CONF="$BACKENDS" \
-        JCI_HANDLERS="$JH/handlers" "$CURL" -s --max-time 20 -w '\n%{http_code}' "$@"
+        JCI_HANDLERS="$JH/handlers" JCI_HOME="$JH" "$CURL" -s --max-time 20 -w '\n%{http_code}' "$@"
 }
 body() { printf '%s' "${1%$'\n'*}"; }
 code() { printf '%s' "${1##*$'\n'}"; }
@@ -215,6 +219,8 @@ if install_or_skip mqtt mqtt; then
     assert_eq    "mqtt GET /peek -> 501 (no replay)"          "501" "$(code "$OUT")"
     OUT=$(hcurl "http://mylocal.mqtt/_info")
     assert_match "mqtt /_info has shape"                      '"stream"' "$(body "$OUT")"
+    assert_match "mqtt /_info renders the AsyncAPI channels"  '"channel": "home/{room}/temperature"' "$(body "$OUT")"
+    assert_match "mqtt /_info gives a tail curl per channel"  'curl -N http://mylocal.mqtt/stream/home/alerts/tail' "$(body "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

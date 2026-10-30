@@ -48,6 +48,7 @@ demos-install: install
 	mkdir -p $(JCI_HOME)/envs/demos
 	cp demos/env/routes.conf    $(JCI_HOME)/envs/demos/
 	cp demos/env/backends.conf  $(JCI_HOME)/envs/demos/
+	cp demos/specs/*.json       $(JCI_HOME)/envs/demos/
 	@echo
 	@echo "demos installed."
 	@echo "  start backends:   cd demos && docker compose up -d"

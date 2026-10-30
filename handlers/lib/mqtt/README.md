@@ -41,6 +41,10 @@ password  = ${MQTT_PASSWORD}
 ca_cert   = /path/ca.pem          # private CA
 client_id = jci                   # default jci-<pid>
 timeout   = 5                     # connect / publish-ack timeout
+
+# Optional: an AsyncAPI document (path or URL; JSON, or YAML with PyYAML in
+# this handler's venv) turns GET /_info into a channel menu with example curls.
+# asyncapi = ~/specs/events.json
 ```
 
 ## Notes
