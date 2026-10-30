@@ -15,3 +15,9 @@ __pycache__/
 
 # ctags
 tags
+
+# local-only design scratch (superpowers specs/plans)
+docs/superpowers/
+
+# superpowers execution scratch (ledgers, briefs)
+.superpowers/

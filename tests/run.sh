@@ -463,6 +463,17 @@ client_key  = $MTLS_DIR/cli.key")
 fi
 
 # ---------------------------------------------------------------------------
+section "unit: jci.py"
+
+PY=${PY:-python3}
+if PYTHONPATH="$REPO/handlers/lib" "$PY" -m unittest discover -s "$REPO/tests/unit" \
+        > "$TMPDIR/unit.out" 2>&1; then
+    ok "jci.py unit tests: $(grep -oE 'Ran [0-9]+ tests?' "$TMPDIR/unit.out")"
+else
+    bad "jci.py unit tests" "$(tail -20 "$TMPDIR/unit.out")"
+fi
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS+FAIL))
 if [ $FAIL -eq 0 ]; then
