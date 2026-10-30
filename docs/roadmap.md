@@ -24,7 +24,7 @@ ADR unless it changes the handler contract (noted where it might).
 | 11 | **asyncapi payload validation** — `validate = true` on kafka/rabbit/mqtt/redis rejects a `POST` whose body fails the channel's message schema (templated channels match); `strict` also refuses unknown channels | feature | jsonschema | **done** |
 | 12 | **memcached** — `kv` shape, text protocol; `/keys` via `lru_crawler metadump`, `/stats` | handler | none | **done** |
 | 13 | **ldap** — `GET /search`, `/find/{term}` (escaped quick lookup), `/entry/{dn}`, `/whoami`; read-only by construction; OpenLDAP in the demo compose | handler | ldap3 | **done** |
-| 14 | **snowflake** — `query` shape, SQL REST API with key-pair JWT | handler | none (jwt via `hmac`? needs RSA → `cryptography`) | planned |
+| 14 | **snowflake** — `query` shape over the SQL REST API v2 (sync, async poll, partitions); auth by PAT/OAuth token, key-pair JWT via `token_cmd`; GET runs under `readonly_role` (server-enforced) or warns post-hoc | handler | none | **done** (fake API; not run live) |
 | 15 | **nats** — `stream` shape; JetStream gives real peek/replay | handler | nats-py | later |
 
 ## Parked

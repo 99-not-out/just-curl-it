@@ -907,6 +907,134 @@ assert_match "llm bedrock stream falls back to one chunk"    'data: {"text": "he
 kill "$LLM_PID" 2>/dev/null; wait "$LLM_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+section "handler: snowflake"
+
+# A fake Snowflake SQL API v2: Bearer PAT required, 'slow' statements go
+# async (202 + handle), 'page' statements return two partitions, DDL/DML
+# report stats, and role RO is refused anything but SELECT (what a
+# read-only role does server-side).
+cat > "$TMPDIR/sfserver.py" <<'PYEOF'
+import http.server, json, re
+Q = {}
+RT = [{"name": "N", "type": "fixed", "scale": 0}, {"name": "S", "type": "text"}]
+def word(s): return (s.strip().split() or ["?"])[0].upper()
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def _auth(self):
+        if self.headers.get("authorization") != "Bearer tok-1" or \
+           self.headers.get("x-snowflake-authorization-token-type") != "PROGRAMMATIC_ACCESS_TOKEN":
+            self._send(401, {"code": "390303", "message": "Invalid OAuth access token."}); return False
+        return True
+    def do_POST(self):
+        if not self._auth(): return
+        n = int(self.headers.get("content-length") or 0); req = json.loads(self.rfile.read(n) or b"{}")
+        sql = req.get("statement", ""); w = word(sql)
+        if req.get("role") == "RO" and w not in ("SELECT", "SHOW", "WITH"):
+            return self._send(422, {"code": "003001", "message": "SQL access control error: Insufficient privileges to operate on schema 'PUBLIC'", "sqlState": "42501"})
+        if "boom" in sql:
+            return self._send(422, {"code": "001003", "message": "SQL compilation error: syntax error line 1 at position 7 unexpected 'boom'.", "sqlState": "42000"})
+        h = f"h-{len(Q)+1}"; Q[h] = {"sql": sql, "role": req.get("role"), "db": req.get("database")}
+        if "slow" in sql:
+            return self._send(202, {"statementHandle": h, "statementStatusUrl": f"/api/v2/statements/{h}", "message": "Asynchronous execution in progress."})
+        return self._send(200, self.result(h, 0))
+    def result(self, h, part):
+        q = Q[h]; sql = q["sql"]; w = word(sql)
+        base = {"statementHandle": h, "resultSetMetaData": {"numRows": 0, "format": "jsonv2", "rowType": RT, "partitionInfo": [{"rowCount": 0}]},
+                "data": [], "code": "090001", "statementStatusUrl": f"/api/v2/statements/{h}", "sqlState": "00000", "message": "Statement executed successfully.", "createdOn": 0}
+        if w == "CREATE":
+            base["resultSetMetaData"]["rowType"] = [{"name": "status", "type": "text"}]; base["data"] = [["Table T successfully created."]]
+            base["stats"] = {"numRowsInserted": 0}
+        elif w == "INSERT":
+            base["resultSetMetaData"]["rowType"] = [{"name": "number of rows inserted", "type": "fixed", "scale": 0}]; base["data"] = [["2"]]
+            base["stats"] = {"numRowsInserted": 2, "numRowsUpdated": 0, "numRowsDeleted": 0}
+        elif "page" in sql:
+            base["resultSetMetaData"]["partitionInfo"] = [{"rowCount": 2}, {"rowCount": 1}]; base["resultSetMetaData"]["numRows"] = 3
+            base["data"] = [["1", "a"], ["2", "b"]] if part == 0 else [["3", "c"]]
+        else:
+            base["resultSetMetaData"]["numRows"] = 1; base["data"] = [["7", "seven"]]
+        if q.get("db"):
+            base["database"] = q["db"]
+        return base
+    def do_GET(self):
+        if not self._auth(): return
+        m = re.fullmatch(r"/api/v2/statements/(h-\d+)(\?partition=(\d+))?", self.path)
+        if m and m.group(1) in Q:
+            q = Q[m.group(1)]; q["polls"] = q.get("polls", 0) + 1
+            if "slow" in q["sql"] and q["polls"] < 2 and not m.group(2):
+                return self._send(202, {"statementHandle": m.group(1), "message": "still running"})
+            return self._send(200, self.result(m.group(1), int(m.group(3) or 0)))
+        return self._send(404, {"message": "no such statement"})
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+mkfifo "$TMPDIR/sfport"
+"${PY:-python3}" "$TMPDIR/sfserver.py" > "$TMPDIR/sfport" 2>"$TMPDIR/sfserver.err" &
+SF_PID=$!
+read -r SF_PORT < "$TMPDIR/sfport"
+cat > "$TMPDIR/sf.conf" <<EOF
+test.sf      $REPO/handlers/run snowflake
+test.sfro    $REPO/handlers/run snowflake
+test.sfbad   $REPO/handlers/run snowflake
+EOF
+cat > "$TMPDIR/sf-backends.conf" <<EOF
+[test.sf]
+upstream  = http://127.0.0.1:$SF_PORT
+account   = xy12345.eu-west-1
+token_cmd = printf tok-1
+database  = DEMO
+warehouse = WH
+[test.sfro]
+upstream      = http://127.0.0.1:$SF_PORT
+account       = xy12345.eu-west-1
+token         = tok-1
+readonly_role = RO
+[test.sfbad]
+upstream  = http://127.0.0.1:$SF_PORT
+account   = xy12345.eu-west-1
+token     = wrong
+EOF
+sf_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/sf.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/sf-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 30 -w '\n%{http_code}' "$@"
+}
+RESP=$(sf_curl -G http://test.sf/query --data-urlencode 'sql=select 7 as n')
+assert_eq    "snowflake GET select -> 200"                   "200" "${RESP##*$'\n'}"
+assert_match "snowflake GET select typed rows"               '"rows": [[7, "seven"]]' "${RESP%$'\n'*}"
+assert_match "snowflake GET reports the handle"              '"statementHandle": "h-' "${RESP%$'\n'*}"
+assert_match "snowflake database from config was sent"       '"database": "DEMO"' "${RESP%$'\n'*}"
+RESP=$(sf_curl -G http://test.sf/query --data-urlencode 'sql=select page')
+assert_match "snowflake GET fetches all partitions"          '"rows": [[1, "a"], [2, "b"], [3, "c"]]' "${RESP%$'\n'*}"
+RESP=$(sf_curl -G http://test.sf/query --data-urlencode 'sql=select slow')
+assert_match "snowflake GET polls an async statement"        '"rows": [[7, "seven"]]' "${RESP%$'\n'*}"
+RESP=$(sf_curl -G http://test.sf/query --data-urlencode 'sql=select boom')
+assert_eq    "snowflake GET compilation error -> 400"        "400" "${RESP##*$'\n'}"
+assert_match "snowflake GET error carries the message"       'syntax error' "${RESP%$'\n'*}"
+# no readonly_role: GET runs DML but says so
+RESP=$(sf_curl -G http://test.sf/query --data-urlencode 'sql=insert into t values (1),(2)')
+assert_eq    "snowflake GET insert without readonly_role -> 200" "200" "${RESP##*$'\n'}"
+assert_match "snowflake GET insert is flagged"               '"warning"' "${RESP%$'\n'*}"
+# readonly_role: the server refuses
+RESP=$(sf_curl -G http://test.sfro/query --data-urlencode 'sql=insert into t values (1)')
+assert_eq    "snowflake GET insert under readonly_role -> 405" "405" "${RESP##*$'\n'}"
+assert_match "snowflake readonly_role refusal names privileges" 'Insufficient privileges' "${RESP%$'\n'*}"
+RESP=$(sf_curl -G http://test.sfro/query --data-urlencode 'sql=select 7')
+assert_eq    "snowflake GET select under readonly_role -> 200" "200" "${RESP##*$'\n'}"
+RESP=$(sf_curl -X POST http://test.sfro/query -d 'create table t (x int)')
+assert_eq    "snowflake POST create (session role) -> 200"   "200" "${RESP##*$'\n'}"
+assert_match "snowflake POST create returns the status"      'successfully created' "${RESP%$'\n'*}"
+RESP=$(sf_curl -G 'http://test.sf/tables' --data-urlencode 'schema=PUBLIC')
+assert_eq    "snowflake GET /tables -> 200"                  "200" "${RESP##*$'\n'}"
+RESP=$(sf_curl http://test.sfbad/tables)
+assert_eq    "snowflake bad token -> 502"                    "502" "${RESP##*$'\n'}"
+kill "$SF_PID" 2>/dev/null; wait "$SF_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF

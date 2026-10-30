@@ -41,7 +41,11 @@ handler's README ships that policy, and the handler reports the post-hoc
 `statementType` with a `warning` on any `GET` that turns out to have run
 DDL or non-SELECT DML, so a credential that isn't read-only is visible the
 first time rather than never. That is weaker than the other SQL handlers
-and the README says so in its own section. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
+and the README says so in its own section. Snowflake sits between the
+two: it has no dry run either, but a statement can be run *as a role*, so
+the `snowflake` handler sends `readonly_role` for every `GET` and the
+server refuses writes with "insufficient privileges"; without the role
+configured it falls back to the Athena-style post-hoc warning. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
 are reads by construction. RabbitMQ `GET /stream/{q}/peek` was destructive
 (`basic_get` with auto-ack) and documented as the one leak in the unified
 shape; since ADR 0006 it fetches without ack and requeues, and `tail`
