@@ -84,6 +84,13 @@ if install_or_skip postgres postgres; then
     assert_match "postgres GET select -> rows"           '"rows": [[1]]' "$(body "$OUT")"
     OUT=$(hcurl -G http://mylocal.postgres/query --data-urlencode "sql=create table $T(x int)")
     assert_eq    "postgres GET create -> 405 (read-only)" "405" "$(code "$OUT")"
+    # Multi-statement GET: COMMIT would end the READ ONLY transaction and the
+    # next statement would run read-write. Must be refused, not executed.
+    OUT=$(hcurl -G http://mylocal.postgres/query --data-urlencode "sql=COMMIT; create table ${T}_esc(x int)")
+    [ "$(code "$OUT")" != "200" ] && ok "postgres GET 'COMMIT; create' refused ($(code "$OUT"))" \
+        || bad "postgres GET 'COMMIT; create' -> 200" "$(body "$OUT")"
+    OUT=$(hcurl http://mylocal.postgres/tables)
+    assert_no_match "postgres GET escape created nothing"  "${T}_esc" "$(body "$OUT")"
     OUT=$(hcurl -X POST http://mylocal.postgres/query -d "create table $T(x int)")
     assert_eq    "postgres POST create -> 200"           "200" "$(code "$OUT")"
     OUT=$(hcurl -X POST http://mylocal.postgres/query -H 'content-type: application/json' \
@@ -192,6 +199,24 @@ if install_or_skip rabbit rabbit; then
     assert_match "rabbit GET /streams lists the queue"    "\"$Q\"" "$(body "$OUT")"
     OUT=$(hcurl -X DELETE "http://mylocal.rabbit/stream/$Q")
     assert_match "rabbit DELETE purges 1"                 '"purged": 1' "$(body "$OUT")"
+    # Real deployments use durable/quorum queues; a default (non-durable)
+    # declare against one fails with PRECONDITION_FAILED. Declare passively.
+    MGMT=$(awk '/^\[mylocal.rabbit\]/{f=1;next} /^\[/{f=0} f && /^mgmt_url/{sub(/^mgmt_url *= */,"");print}' "$BACKENDS")
+    DQ="jci-durable-$$"
+    "$CURL" -s -o /dev/null -X PUT "$MGMT/api/queues/%2F/$DQ" -H 'content-type: application/json' \
+        -d '{"durable":true,"auto_delete":false}'
+    OUT=$(hcurl -X POST "http://mylocal.rabbit/stream/$DQ" -d 'd1')
+    assert_eq    "rabbit POST to a durable queue -> 200"  "200" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/stream/$DQ/peek?limit=1")
+    assert_match "rabbit peek on a durable queue works"   '"body": "d1"' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/stream/$DQ")
+    assert_match "rabbit GET on a durable queue works"    '"messageCount": 1' "$(body "$OUT")"
+    "$CURL" -s -o /dev/null -X DELETE "$MGMT/api/queues/%2F/$DQ"
+    # GET on a queue that doesn't exist is a 404 and creates nothing.
+    OUT=$(hcurl "http://mylocal.rabbit/stream/jci-nonexistent-$$")
+    assert_eq    "rabbit GET unknown queue -> 404"        "404" "$(code "$OUT")"
+    MC=$("$CURL" -s -o /dev/null -w '%{http_code}' "$MGMT/api/queues/%2F/jci-nonexistent-$$")
+    assert_eq    "rabbit GET unknown queue created nothing" "404" "$MC"
 fi
 
 summary

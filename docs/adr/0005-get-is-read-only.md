@@ -33,9 +33,17 @@ are reads by construction. RabbitMQ `GET /stream/{q}/peek` was destructive
 shape; since ADR 0006 it fetches without ack and requeues, and `tail`
 holds messages unacked so the broker requeues them on disconnect. The
 remaining cost — messages held by an open tail are invisible to other
-consumers — is stated in the handler's README. `GET /stream/{q}` still
-declares the queue if absent (idempotent, default arguments); that is the
-one state change a `GET` makes anywhere in the library.
+consumers — is stated in the handler's README. Queues are found by passive
+declare, so a `GET` creates nothing (a missing queue is a `404`).
+
+Two holes the first review of the library found, and the fixes that are
+now regression tests: Postgres's simple-query protocol runs several
+statements, so `GET /query?sql=COMMIT;DROP TABLE x` ended the read-only
+transaction — `GET` now uses a prepared (single-statement) execute. SQLite
+opened read-only still wrote *other* files via `VACUUM INTO` and `ATTACH`
+— read-only connections now refuse attachments. The lesson for new
+handlers: "the backend refuses writes" must cover every channel the
+statement language has, not just the one you first thought of.
 
 ## Consequences
 

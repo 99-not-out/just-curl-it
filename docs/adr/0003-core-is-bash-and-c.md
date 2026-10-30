@@ -32,7 +32,7 @@ keep sharp.
 The user-facing core stays bash + C. `bin/jci` and `lib/helpers.sh` never
 require Python; if they ever need to, that is a new decision. Bundled
 handlers may be Python provided they are stdlib-only and run under any
-`python3` ≥ 3.8 without a venv. Anything needing third-party packages
+`python3` ≥ 3.9 without a venv. Anything needing third-party packages
 belongs in `demos/` behind its own venv. A curl-based proxy, if written,
 ships alongside `proxy.py` as a second handler, not as a replacement.
 

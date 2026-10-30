@@ -193,6 +193,13 @@ assert_eq    "uninstalled handler -> 503"      "503" "${RESP##*$'\n'}"
 OUT=$(jh handler install nosuch 2>&1); RC=$?
 [ $RC -ne 0 ] && ok "install nosuch exits non-zero" || bad "install nosuch exits non-zero"
 assert_match "install nosuch names the problem" "no such handler" "$OUT"
+# Names are validated like `run` does, so a typo can't become `rm -rf lib`.
+OUT=$(jh handler uninstall ../lib 2>&1); RC=$?
+[ $RC -ne 0 ] && ok "uninstall ../lib exits non-zero" || bad "uninstall ../lib exits non-zero" "$OUT"
+[ -f "$JH/handlers/lib/jci.py" ] && ok "uninstall ../lib left the library intact" \
+    || bad "uninstall ../lib deleted the library"
+OUT=$(jh handler install ../lib 2>&1); RC=$?
+[ $RC -ne 0 ] && ok "install ../lib exits non-zero" || bad "install ../lib exits non-zero" "$OUT"
 assert_match "doctor lists venv handlers"      "handler withdeps:" "$(jh doctor 2>&1)"
 
 # ---------------------------------------------------------------------------
@@ -234,6 +241,21 @@ assert_match "sqlite GET select sees the row"        '"rows": [[1]]' "${RESP%$'\
 RESP=$(sq_curl -X POST http://test.sqro/query -d 'insert into t values (2)')
 assert_eq    "sqlite readonly=true POST -> 405"      "405" "${RESP##*$'\n'}"
 assert_match "sqlite readonly=true names the key"    'readonly' "${RESP%$'\n'*}"
+# Hostile GETs (ADR 0005): statements that write to the *filesystem* even
+# when the database itself is opened read-only.
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode "sql=VACUUM INTO '$TMPDIR/vac.db'")
+[ "${RESP##*$'\n'}" != "200" ] && ok "sqlite GET VACUUM INTO refused (${RESP##*$'\n'})" \
+    || bad "sqlite GET VACUUM INTO -> 200" "${RESP%$'\n'*}"
+[ ! -e "$TMPDIR/vac.db" ] && ok "sqlite GET VACUUM INTO wrote nothing" || bad "sqlite GET VACUUM INTO created $TMPDIR/vac.db"
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode "sql=ATTACH '$TMPDIR/att.db' AS n")
+[ "${RESP##*$'\n'}" != "200" ] && ok "sqlite GET ATTACH refused (${RESP##*$'\n'})" \
+    || bad "sqlite GET ATTACH -> 200" "${RESP%$'\n'*}"
+[ ! -e "$TMPDIR/att.db" ] && ok "sqlite GET ATTACH wrote nothing" || bad "sqlite GET ATTACH created $TMPDIR/att.db"
+# A write with RETURNING has a result set; it must still be committed.
+RESP=$(sq_curl -X POST http://test.sq/query -d 'insert into t values (9) returning x')
+assert_match "sqlite POST insert..returning -> rows"  '"rows": [[9]]' "${RESP%$'\n'*}"
+RESP=$(sq_curl -G http://test.sq/query --data-urlencode 'sql=select count(*) from t where x = 9')
+assert_match "sqlite RETURNING write was committed"   '"rows": [[1]]' "${RESP%$'\n'*}"
 RESP=$(sq_curl http://test.sqnone/tables)
 assert_eq    "sqlite missing file -> 502"            "502" "${RESP##*$'\n'}"
 assert_match "sqlite missing file named"             'missing.db' "${RESP%$'\n'*}"
@@ -278,12 +300,16 @@ for _ in $(seq 1 50); do [ -S "$TMPDIR/s.sock" ] && break; sleep 0.1; done
 cat > "$TMPDIR/ux.conf" <<EOF
 test.ux      $REPO/handlers/run unix-http
 test.uxnone  $REPO/handlers/run unix-http
+test.uxfile  $REPO/handlers/run unix-http
 EOF
+printf 'not a socket\n' > "$TMPDIR/plain.file"
 cat > "$TMPDIR/ux-backends.conf" <<EOF
 [test.ux]
 socket = $TMPDIR/s.sock
 [test.uxnone]
 socket = $TMPDIR/none.sock
+[test.uxfile]
+socket = $TMPDIR/plain.file
 EOF
 ux_curl() {
     env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/ux.conf" \
@@ -299,6 +325,9 @@ assert_match "unix-http header forwarded"             '"x-tag": "t"' "${RESP%$'\
 RESP=$(ux_curl http://test.uxnone/)
 assert_eq    "unix-http missing socket -> 502"        "502" "${RESP##*$'\n'}"
 assert_match "unix-http missing socket named"         'none.sock' "${RESP%$'\n'*}"
+RESP=$(ux_curl http://test.uxfile/)
+assert_eq    "unix-http non-socket path -> 502"       "502" "${RESP##*$'\n'}"
+assert_match "unix-http non-socket path named"        'plain.file' "${RESP%$'\n'*}"
 kill "$UX_PID" 2>/dev/null; wait "$UX_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------

@@ -42,6 +42,8 @@ timeout  = 5
   alternative was a tail that silently ate messages.
 - `GET /streams` needs the management plugin and `mgmt_url`; everything
   else is plain AMQP.
-- `GET /stream/{q}` declares the queue if it doesn't exist (default
-  arguments). On a `GET`-only route this is the one state change a GET can
-  make here; it is idempotent and creates nothing but an empty queue.
+- Queues are looked up with a *passive* declare, so durable and quorum
+  queues work (a default declare would fail with `PRECONDITION_FAILED`),
+  and `GET`/`DELETE` on a queue that doesn't exist is a `404` — nothing
+  is created. Only `POST /stream/{q}` declares a missing queue, with
+  default (non-durable) arguments.

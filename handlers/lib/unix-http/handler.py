@@ -8,11 +8,16 @@ whole handler. A GET-only route gives a read-only view of the daemon.
 """
 from __future__ import annotations
 
+import errno as _errno
 import http.client
 import os
 import socket
 
 import jci
+
+
+def errno_name(code: int) -> str:
+    return _errno.errorcode.get(code, str(code))
 
 ROUTES = [
     "GET  /_info",
@@ -48,10 +53,13 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
     try:
         conn.request(method, path, body=body or None, headers=out_headers)
         resp = conn.getresponse()
-    except (FileNotFoundError, ConnectionRefusedError, PermissionError, socket.timeout) as e:
+    except OSError as e:
+        # Missing, refused, not-a-socket, path too long, timeout: every one
+        # is "couldn't talk to the socket", so every one is a 502 that names it.
         errno = getattr(e, "errno", None)
-        reason = os.strerror(errno) if errno else type(e).__name__
-        return jci.send_error(502, f"{reason}: {sock_path}")
+        reason = os.strerror(errno) if errno else (str(e) or type(e).__name__)
+        return jci.send_error(502, f"{reason}: {sock_path}",
+                              errno=errno_name(errno) if errno else None)
     try:
         jci.forward_response(resp)
     finally:

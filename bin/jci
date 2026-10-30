@@ -225,6 +225,15 @@ handler_dir() { echo "$HANDLER_LIB/$1"; }
 # A directory is a handler only if it has an entrypoint; __pycache__ isn't.
 is_handler_dir() { [ -f "$1/handler.py" ] || [ -f "$1/handler.sh" ]; }
 
+# Same rule as handlers/run: a name is [a-z0-9_-], never a path. Checked
+# before anything is created or removed, so `uninstall ../lib` is an error,
+# not `rm -rf lib`.
+valid_handler_name() {
+    case "$1" in
+        ""|*[!a-z0-9_-]*|-*|_*) echo "jci: invalid handler name: '$1' (use [a-z0-9_-])" >&2; return 1 ;;
+    esac
+}
+
 # 0 if requirements.txt has a line that isn't blank or a comment.
 handler_needs_venv() {
     [ -f "$1/requirements.txt" ] && \
@@ -304,6 +313,7 @@ handler_ls() {
 handler_info() {
     local name="${1:-}"
     [ -n "$name" ] || { echo "usage: jci handler info <name>" >&2; return 2; }
+    valid_handler_name "$name" || return 1
     local dir; dir=$(handler_dir "$name")
     is_handler_dir "$dir" || { echo "jci: no such handler: $name (try: jci handler ls)" >&2; return 1; }
     if [ -f "$dir/README.md" ]; then cat "$dir/README.md"; else echo "(no README.md for $name)"; fi
@@ -316,6 +326,7 @@ handler_install() {
     [ $# -gt 0 ] || { echo "usage: jci handler install <name>..." >&2; return 2; }
     local name dir venv py rc=0
     for name in "$@"; do
+        valid_handler_name "$name" || { rc=1; continue; }
         dir=$(handler_dir "$name")
         if ! is_handler_dir "$dir"; then
             echo "jci: no such handler: $name (try: jci handler ls)" >&2; rc=1; continue
@@ -344,14 +355,16 @@ handler_uninstall() {
     if [ "$1" = "--all" ]; then
         rm -rf "$HANDLER_VENVS"; echo "removed all handler venvs"; return
     fi
-    local name
+    local name rc=0
     for name in "$@"; do
+        valid_handler_name "$name" || { rc=1; continue; }
         if [ -d "$HANDLER_VENVS/$name" ]; then
             rm -rf "$HANDLER_VENVS/$name"; echo "$name: uninstalled"
         else
             echo "$name: nothing installed"
         fi
     done
+    return $rc
 }
 
 cmd_handler() {

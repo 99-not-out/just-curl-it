@@ -50,17 +50,30 @@ def connect(cfg: dict, **kw):
 
 
 def run_query(cfg: dict, sql: str, params=None, read_only: bool = False) -> None:
+    from psycopg import ProgrammingError
     from psycopg.errors import ReadOnlySqlTransaction
     with connect(cfg) as conn, conn.cursor() as cur:
         # HTTP semantics onto SQL: GET may not mutate. Postgres enforces it
         # (default_transaction_read_only), not a regex over the statement.
+        # prepare=True on GET makes it the extended-query protocol, which
+        # takes exactly one statement -- so "COMMIT; DROP TABLE x" can't end
+        # the read-only transaction and run the rest read-write.
         conn.read_only = read_only
         try:
-            cur.execute(sql, params or None)
+            if read_only:
+                cur.execute(sql, params or None, prepare=True)
+            else:
+                cur.execute(sql, params or None)
         except ReadOnlySqlTransaction as e:
             return jci.send_error(405, f"GET /query is read-only: {e.diag.message_primary}",
                                   hint="use POST /query to run statements that write",
                                   allow=["POST"])
+        except ProgrammingError as e:
+            # The one-statement rule above surfaces as this on multi-statement GETs.
+            if "multiple commands" in str(e):
+                return jci.send_error(405, "GET /query takes exactly one statement",
+                                      hint="use POST /query for scripts", allow=["POST"])
+            return jci.send_error(400, f"{type(e).__name__}: {e}")
         if cur.description is None:
             conn.commit()
             return jci.send_json(200, {"rowCount": cur.rowcount})

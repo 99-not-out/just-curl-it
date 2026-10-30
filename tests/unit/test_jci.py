@@ -122,6 +122,17 @@ class LoadBackend(unittest.TestCase):
         self.assertEqual(jci.timeout({}), 5.0)
         self.assertEqual(jci.timeout({"timeout": "2.5"}), 2.5)
 
+    def test_inline_comments_stripped_but_hash_inside_value_kept(self):
+        # Every handler README writes `key = value   # explanation`; copying
+        # that must work. A '#' with no whitespace before it is data.
+        path = self._conf("[h]\ntimeout = 5    # connect timeout\n"
+                          "path = ~/x.db  # required\npassword = a#b\n")
+        with mock.patch.dict(os.environ, {"INTERCEPT_BACKENDS_CONF": path}):
+            cfg = jci.load_backend("h")
+        self.assertEqual(jci.timeout(cfg), 5.0)
+        self.assertEqual(cfg["path"], "~/x.db")
+        self.assertEqual(cfg["password"], "a#b")
+
 
 class Redact(unittest.TestCase):
     def test_key_patterns(self):
@@ -136,6 +147,17 @@ class Redact(unittest.TestCase):
         r = jci.redact({"url": "amqp://guest:guest@h:5672/", "plain": "http://h/"})
         self.assertEqual(r["url"], "amqp://***@h:5672/")
         self.assertEqual(r["plain"], "http://h/")
+
+    def test_cookie_and_session_headers_redacted(self):
+        r = jci.redact({"header_cookie": "sid=abc", "header_x-session-id": "s1",
+                        "header_accept": "application/json"})
+        self.assertEqual(r["header_cookie"], "***")
+        self.assertEqual(r["header_x-session-id"], "***")
+        self.assertEqual(r["header_accept"], "application/json")
+
+    def test_keyword_dsn_password_redacted(self):
+        r = jci.redact({"dsn": "host=db user=app password=s3cret dbname=x"})
+        self.assertEqual(r["dsn"], "host=db user=app password=*** dbname=x")
 
 
 class _FakeResp:

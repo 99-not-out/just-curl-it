@@ -76,7 +76,10 @@ curl -X POST http://mylocal.sqs/ -d 'Action=ListQueues&Version=2012-11-05'
   handler switches on `service = s3`, and both rule sets are pinned by the
   AWS test-suite vectors in `tests/fixtures/sigv4/`.
 - **Encode your keys.** A key with a space is `my%20key.txt` in the URL;
-  curl rejects a raw space. `+` in a key must be `%2B`.
+  curl rejects a raw space. `+` in a key must be `%2B`. In a *query string*
+  a `+` is treated as a space (form decoding), so a literal plus there is
+  `%2B` too; the AWS test vectors never put a raw `+` in a query, so this
+  follows what S3 does rather than a published rule.
 - **Body is held in memory** to hash it (`x-amz-content-sha256`). Fine for
   objects up to `JCI_MAX_BODY` (64 MiB default); multipart upload is not
   implemented.

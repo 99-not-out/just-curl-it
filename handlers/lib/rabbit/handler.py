@@ -30,7 +30,7 @@ import jci
 ROUTES = [
     "GET    /_info",
     "GET    /streams                        (queues, via management API)",
-    "GET    /stream/{q}                     (declare + counts)",
+    "GET    /stream/{q}                     (counts; 404 if the queue doesn't exist)",
     "POST   /stream/{q}                     (publish; body = message)",
     "GET    /stream/{q}/peek?limit=1        (non-destructive: messages are requeued)",
     "GET    /stream/{q}/tail                (SSE; held unacked while open, requeued on disconnect)",
@@ -48,6 +48,29 @@ def amqp_conn(cfg: dict):
     params.socket_timeout = jci.timeout(cfg)
     params.blocked_connection_timeout = jci.timeout(cfg)
     return pika.BlockingConnection(params)
+
+
+class QueueNotFound(Exception):
+    pass
+
+
+def _queue(conn, q: str, create: bool = False):
+    """(channel, declare-ok) for an existing queue, found by *passive*
+    declare -- which never creates anything and never argues about
+    durable/quorum arguments the way a default declare does. A missing
+    queue raises QueueNotFound (-> 404) unless create=True, in which case it
+    is declared with default arguments (POST only)."""
+    import pika.exceptions
+    ch = conn.channel()
+    try:
+        return ch, ch.queue_declare(queue=q, passive=True)
+    except pika.exceptions.ChannelClosedByBroker as e:
+        if e.reply_code != 404:
+            raise
+        if not create:
+            raise QueueNotFound(q) from None
+        ch = conn.channel()   # the broker closed the first one
+        return ch, ch.queue_declare(queue=q)
 
 
 def mgmt_get(cfg: dict, path: str):
@@ -89,17 +112,16 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
         q = m.group(1)
         conn = amqp_conn(cfg)
         try:
-            ch = conn.channel()
             if method == "GET":
-                ok = ch.queue_declare(queue=q)
+                _, ok = _queue(conn, q)
                 return jci.send_json(200, {"name": q, "messageCount": ok.method.message_count,
                                            "consumerCount": ok.method.consumer_count})
             if method == "POST":
-                ch.queue_declare(queue=q)
+                ch, _ = _queue(conn, q, create=True)
                 ch.basic_publish(exchange="", routing_key=q, body=body)
                 return jci.send_json(200, {"name": q, "published": True, "bytes": len(body)})
             if method == "DELETE":
-                ch.queue_declare(queue=q)
+                ch, _ = _queue(conn, q)
                 ok = ch.queue_purge(queue=q)
                 return jci.send_json(200, {"name": q, "purged": ok.method.message_count})
         finally:
@@ -112,8 +134,7 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
         conn = amqp_conn(cfg)
         msgs, tags = [], []
         try:
-            ch = conn.channel()
-            ch.queue_declare(queue=q)
+            ch, _ = _queue(conn, q)
             for _ in range(limit):
                 mf, _props, mbody = ch.basic_get(queue=q, auto_ack=False)
                 if mf is None:
@@ -133,8 +154,7 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
         q = m.group(1)
         conn = amqp_conn(cfg)
         try:
-            ch = conn.channel()
-            ch.queue_declare(queue=q)
+            ch, _ = _queue(conn, q)
             jci.send_sse_headers()
             jci.sse_comment(f"tailing {q}; messages are held unacked and requeued when you disconnect")
             try:
@@ -166,5 +186,13 @@ def route(method: str, path: str, headers: dict, body: bytes) -> None:
     jci.send_error(404, f"no route for {method} {p}")
 
 
+def main_route(method: str, path: str, headers: dict, body: bytes) -> None:
+    try:
+        route(method, path, headers, body)
+    except QueueNotFound as e:
+        jci.send_error(404, f"no such queue: {e}",
+                       hint="POST /stream/{q} declares it with default arguments")
+
+
 if __name__ == "__main__":
-    jci.main(route)
+    jci.main(main_route)

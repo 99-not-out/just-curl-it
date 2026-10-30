@@ -235,12 +235,14 @@ def sse_comment(text: str) -> None:
 
 def load_backend(host: str | None = None) -> dict:
     """The [host] section of backends.conf as a dict, ${VAR}-expanded.
-    No '%' interpolation, so passwords with '%' survive."""
+    No '%' interpolation, so passwords with '%' survive. A '#' preceded by
+    whitespace starts a comment (`timeout = 5   # seconds`), as every
+    handler README writes it; `a#b` is data, `a #b` is not."""
     host = host or HOST
     path = os.environ.get("INTERCEPT_BACKENDS_CONF", "/etc/intercept/backends.conf")
     if not os.path.exists(path):
         raise BackendConfigError(f"backends file not found: {path}")
-    cp = configparser.ConfigParser(interpolation=None)
+    cp = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#",))
     cp.read(path)
     if host not in cp:
         raise BackendConfigError(f"no [{host}] section in {path}")
@@ -252,19 +254,23 @@ def timeout(cfg: dict) -> float:
     return float(cfg.get("timeout", 5))
 
 
-_SECRET_KEY = re.compile(r"pass|secret|token|authorization|key", re.I)
+_SECRET_KEY = re.compile(r"pass|secret|token|authorization|key|cookie|session", re.I)
 _URL_USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", re.I)
+_KW_PASSWORD = re.compile(r"\b(password|passwd|pwd)=\S+", re.I)   # libpq keyword DSNs
 
 
 def redact(cfg: dict) -> dict:
     """Copy of cfg safe to show: secret-looking keys become '***', URL
-    userinfo becomes 'scheme://***@host'."""
+    userinfo becomes 'scheme://***@host', `password=x` inside a value
+    becomes `password=***`."""
     out = {}
     for k, v in cfg.items():
         if _SECRET_KEY.search(k):
             out[k] = "***"
         elif isinstance(v, str) and _URL_USERINFO.match(v):
             out[k] = _URL_USERINFO.sub(r"\1***@", v)
+        elif isinstance(v, str) and _KW_PASSWORD.search(v):
+            out[k] = _KW_PASSWORD.sub(r"\1=***", v)
         else:
             out[k] = v
     return out

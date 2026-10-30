@@ -40,7 +40,19 @@ def connect(cfg: dict, write: bool) -> sqlite3.Connection:
         raise FileNotFoundError(path)
     mode = "rw" if write else "ro"
     uri = f"file:{quote(path)}?mode={mode}"
-    return sqlite3.connect(uri, uri=True, timeout=jci.timeout(cfg))
+    conn = sqlite3.connect(uri, uri=True, timeout=jci.timeout(cfg))
+    if not write:
+        # mode=ro protects *this* file. ATTACH and VACUUM INTO write *other*
+        # files, which a read-only GET must not do either (ADR 0005). Refuse
+        # attachments outright: the limit on 3.11+, the authorizer everywhere.
+        if hasattr(conn, "setlimit") and hasattr(sqlite3, "SQLITE_LIMIT_ATTACHED"):
+            conn.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+        conn.set_authorizer(_deny_attach)
+    return conn
+
+
+def _deny_attach(action, *_):
+    return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ATTACH else sqlite3.SQLITE_OK
 
 
 def run_query(cfg: dict, sql: str, params=None, write: bool = False) -> None:
@@ -52,18 +64,25 @@ def run_query(cfg: dict, sql: str, params=None, write: bool = False) -> None:
         try:
             cur = conn.execute(sql, params or ())
         except sqlite3.OperationalError as e:
-            if "readonly" in str(e):
+            if "readonly" in str(e) or "too many attached" in str(e):
                 return jci.send_error(405, f"GET /query is read-only: {e}",
                                       hint="use POST /query to run statements that write",
                                       allow=["POST"])
             return jci.send_error(400, f"{type(e).__name__}: {e}")
-        except sqlite3.Error as e:
+        except sqlite3.DatabaseError as e:
+            if "not authorized" in str(e):
+                return jci.send_error(405, f"GET /query is read-only: {e}",
+                                      hint="use POST /query to run statements that write",
+                                      allow=["POST"])
             return jci.send_error(400, f"{type(e).__name__}: {e}")
         if cur.description is None:
-            conn.commit()
+            if write:
+                conn.commit()
             return jci.send_json(200, {"rowCount": cur.rowcount})
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
+        if write:
+            conn.commit()   # INSERT ... RETURNING has a result set and still writes
         jci.send_json(200, {"columns": cols, "rowCount": len(rows),
                             "rows": [list(r) for r in rows]})
     finally:
