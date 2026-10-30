@@ -130,30 +130,38 @@ static void load_config(void) {
         if (*p == '#' || *p == '\n' || *p == 0) continue;
 
         /* Format:  <host>  [<METHODS>]  <handler-cmd...>
-         * Detect METHODS by trying a 3-token parse first; if the second token
-         * is all uppercase, commas, or asterisks, it's the allow-list,
-         * else fall back to the
-         * 2-token form (no methods, handler is everything after the host). */
-        char host[256] = {0}, first[64] = {0}, rest[512] = {0};
-        int n = sscanf(p, "%255s %63s %511[^\n]", host, first, rest);
-        if (n < 2) continue;
+         * Tokenise by hand rather than sscanf("%63s"): a fixed-width field
+         * would split a handler path longer than its width and re-join it
+         * with a space. The second token is the allow-list only if it's all
+         * uppercase, commas or asterisks; otherwise the handler is
+         * everything after the host, verbatim. */
+        trim(p);
+        char *host = p;
+        char *q = p;
+        while (*q && *q != ' ' && *q != '\t') q++;
+        if (!*q) continue;                      /* host with no handler */
+        *q++ = 0;
+        while (*q == ' ' || *q == '\t') q++;
+        if (!*q) continue;
 
         struct route *r = &g_routes[g_route_count];
         memset(r, 0, sizeof(*r));
 
-        if (n == 3 && is_method_token(first)) {
-            strncpy(r->methods, first, sizeof(r->methods)-1);
-            trim(rest);
-            strncpy(r->handler, rest, sizeof(r->handler)-1);
-        } else if (n == 3) {
-            char joined[512];
-            snprintf(joined, sizeof(joined), "%s %s", first, rest);
-            trim(joined);
-            strncpy(r->handler, joined, sizeof(r->handler)-1);
-        } else {
-            trim(first);
-            strncpy(r->handler, first, sizeof(r->handler)-1);
+        char *tok = q;
+        while (*q && *q != ' ' && *q != '\t') q++;
+        if (*q) {
+            char saved = *q;
+            *q = 0;
+            if (is_method_token(tok)) {
+                strncpy(r->methods, tok, sizeof(r->methods)-1);
+                q++;
+                while (*q == ' ' || *q == '\t') q++;
+                tok = q;
+            } else {
+                *q = saved;                     /* second word is part of the handler */
+            }
         }
+        strncpy(r->handler, tok, sizeof(r->handler)-1);
         if (r->handler[0] == 0) continue;
         strncpy(r->host, host, sizeof(r->host)-1);
         /* Skip 127.0.0.1 to avoid clashing with real local services. */
