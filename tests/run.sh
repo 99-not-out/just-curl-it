@@ -477,6 +477,129 @@ assert_eq    "missing spec: /_info still answers 200"        "200" "${RESP##*$'\
 assert_match "missing spec is reported in the api section"   'does-not-exist.json' "${RESP%$'\n'*}"
 
 # ---------------------------------------------------------------------------
+section "handler: bigquery"
+
+# A fake BigQuery REST API: requires Bearer tok-1, classifies dry runs by
+# the statement's first word, pages a 'page' query, and makes a 'slow'
+# query incomplete on the first call so the handler has to poll.
+cat > "$TMPDIR/bqserver.py" <<'PYEOF'
+import http.server, json, re
+STATE = {"slow_calls": 0}
+def classify(q):
+    w = (q.strip().split() or ["?"])[0].upper()
+    return {"SELECT": "SELECT", "WITH": "SELECT", "CREATE": "CREATE_TABLE", "INSERT": "INSERT",
+            "DELETE": "DELETE", "DROP": "DROP_TABLE", "MERGE": "MERGE"}.get(w, "SCRIPT")
+INT = {"name": "n", "type": "INTEGER"}
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def _auth(self):
+        if self.headers.get("authorization") != "Bearer tok-1":
+            self._send(401, {"error": {"code": 401, "message": "Request had invalid authentication credentials."}})
+            return False
+        return True
+    def do_GET(self):
+        if not self._auth(): return
+        if re.fullmatch(r"/bigquery/v2/projects/p1/datasets(\?.*)?", self.path):
+            return self._send(200, {"datasets": [{"datasetReference": {"datasetId": "d1"}}, {"datasetReference": {"datasetId": "d2"}}]})
+        if re.fullmatch(r"/bigquery/v2/projects/p1/datasets/d1/tables(\?.*)?", self.path):
+            return self._send(200, {"tables": [{"tableReference": {"tableId": "t1"}, "type": "TABLE"}]})
+        m = re.fullmatch(r"/bigquery/v2/projects/p1/queries/(job-[a-z]+)(\?.*)?", self.path)
+        if m:
+            job = m.group(1)
+            if job == "job-page" and "pageToken=pt1" in self.path:
+                return self._send(200, {"jobComplete": True, "schema": {"fields": [INT]}, "rows": [{"f": [{"v": "3"}]}]})
+            if job == "job-slow":
+                return self._send(200, {"jobComplete": True, "schema": {"fields": [INT]}, "rows": [{"f": [{"v": "7"}]}], "totalRows": "1"})
+        return self._send(404, {"error": {"message": "not found " + self.path}})
+    def do_POST(self):
+        if not self._auth(): return
+        n = int(self.headers.get("content-length") or 0)
+        req = json.loads(self.rfile.read(n) or b"{}")
+        if self.path.startswith("/bigquery/v2/projects/p1/jobs"):
+            q = req.get("configuration", {}).get("query", {}).get("query", "")
+            if req.get("configuration", {}).get("dryRun"):
+                return self._send(200, {"jobReference": {"jobId": "dry"}, "statistics": {
+                    "query": {"statementType": classify(q)}, "totalBytesProcessed": "4096"}})
+            return self._send(400, {"error": {"message": "fixture only supports dry runs on jobs.insert"}})
+        if self.path.startswith("/bigquery/v2/projects/p1/queries"):
+            q = req.get("query", "")
+            if "page" in q:
+                return self._send(200, {"jobComplete": True, "jobReference": {"jobId": "job-page"},
+                                        "schema": {"fields": [INT]}, "rows": [{"f": [{"v": "1"}]}, {"f": [{"v": "2"}]}],
+                                        "pageToken": "pt1", "totalRows": "3"})
+            if "slow" in q:
+                return self._send(200, {"jobComplete": False, "jobReference": {"jobId": "job-slow", "location": "EU"}})
+            if "boom" in q:
+                return self._send(400, {"error": {"code": 400, "message": "Syntax error: Unexpected keyword BOOM at [1:8]"}})
+            if classify(q) != "SELECT":
+                return self._send(200, {"jobComplete": True, "jobReference": {"jobId": "job-ddl"},
+                                        "numDmlAffectedRows": "0", "totalRows": "0"})
+            return self._send(200, {"jobComplete": True, "jobReference": {"jobId": "job-sel"},
+                                    "schema": {"fields": [INT, {"name": "s", "type": "STRING"}]},
+                                    "rows": [{"f": [{"v": "1"}, {"v": "one"}]}], "totalRows": "1",
+                                    "totalBytesProcessed": "0"})
+        return self._send(404, {"error": {"message": "not found " + self.path}})
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+mkfifo "$TMPDIR/bqport"
+"${PY:-python3}" "$TMPDIR/bqserver.py" > "$TMPDIR/bqport" 2>"$TMPDIR/bqserver.err" &
+BQ_PID=$!
+read -r BQ_PORT < "$TMPDIR/bqport"
+cat > "$TMPDIR/bq.conf" <<EOF
+test.bq     $REPO/handlers/run bigquery
+test.bqbad  $REPO/handlers/run bigquery
+EOF
+cat > "$TMPDIR/bq-backends.conf" <<EOF
+[test.bq]
+upstream  = http://127.0.0.1:$BQ_PORT
+project   = p1
+token_cmd = printf tok-1
+[test.bqbad]
+upstream  = http://127.0.0.1:$BQ_PORT
+project   = p1
+token     = wrong
+EOF
+bq_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/bq.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/bq-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 20 -w '\n%{http_code}' "$@"
+}
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=select 1 as n, "one" as s')
+assert_eq    "bigquery GET select -> 200"                    "200" "${RESP##*$'\n'}"
+assert_match "bigquery GET select typed rows"                '"rows": [[1, "one"]]' "${RESP%$'\n'*}"
+assert_match "bigquery GET reports the statement type"       '"statementType": "SELECT"' "${RESP%$'\n'*}"
+assert_match "bigquery GET reports the dry-run estimate"     '"estimatedBytes": 4096' "${RESP%$'\n'*}"
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=create table d1.t2 (x int64)')
+assert_eq    "bigquery GET create -> 405"                    "405" "${RESP##*$'\n'}"
+assert_match "bigquery GET create names the statement type" 'CREATE_TABLE' "${RESP%$'\n'*}"
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=insert into d1.t1 values (1)')
+assert_eq    "bigquery GET insert -> 405"                    "405" "${RESP##*$'\n'}"
+RESP=$(bq_curl -X POST http://test.bq/query -d 'create table d1.t2 (x int64)')
+assert_eq    "bigquery POST create -> 200"                   "200" "${RESP##*$'\n'}"
+assert_match "bigquery POST create reports the job"          '"jobId": "job-ddl"' "${RESP%$'\n'*}"
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=select page')
+assert_match "bigquery GET follows pageToken"                '"rows": [[1], [2], [3]]' "${RESP%$'\n'*}"
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=select slow')
+assert_match "bigquery GET polls an incomplete job"          '"rows": [[7]]' "${RESP%$'\n'*}"
+RESP=$(bq_curl -G http://test.bq/query --data-urlencode 'sql=select boom')
+assert_eq    "bigquery GET syntax error -> 400"              "400" "${RESP##*$'\n'}"
+assert_match "bigquery GET syntax error carries the message" 'Unexpected keyword BOOM' "${RESP%$'\n'*}"
+RESP=$(bq_curl http://test.bq/datasets)
+assert_match "bigquery GET /datasets"                        '"datasets": ["d1", "d2"]' "${RESP%$'\n'*}"
+RESP=$(bq_curl 'http://test.bq/tables?dataset=d1')
+assert_match "bigquery GET /tables?dataset="                 '"t1"' "${RESP%$'\n'*}"
+RESP=$(bq_curl http://test.bqbad/datasets)
+assert_eq    "bigquery bad token -> 502"                     "502" "${RESP##*$'\n'}"
+assert_match "bigquery bad token carries Google's message"   'invalid authentication' "${RESP%$'\n'*}"
+kill "$BQ_PID" 2>/dev/null; wait "$BQ_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF
