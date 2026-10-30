@@ -17,7 +17,7 @@ ADR unless it changes the handler contract (noted where it might).
 | 4 | **graphql** — `GET /gql?query=&vars=&op=`, `POST /gql`, `GET /schema`, `GET /types/{T}`; GET refuses `mutation`/`subscription` documents (ADR 0005 records the exception) | handler | none | **done** |
 | 5 | **mqtt** — `stream` shape: publish, SSE tail with `+`/`#`, retained message as `GET /stream/{t}`, `DELETE` clears retained | handler | paho-mqtt | **done** |
 | 6 | **spec-aware `/_info`** — `openapi =` on `proxy`; `asyncapi =` on stream handlers (v2 and v3): operation/channel menu, schema summary, example curls on the intercepted hostname; shared in `jci.info()` so every handler has it | feature | PyYAML for YAML specs (JSON needs none) | **done** |
-| 7 | **`jci_aws.py`** — lift the SigV4 signer out of `aws-sigv4/handler.py` into a shared stdlib module for Athena and Bedrock | refactor | none | planned |
+| 7 | **`jci_aws.py`** — SigV4 signer, credential resolution and `sign_request(cfg, ...)` lifted out of `aws-sigv4/handler.py`; the handler is now 40 lines of glue | refactor | none | **done** |
 | 8 | **bigquery** — `query` shape; GET dry-runs first and executes only `statementType == SELECT`; token via `gcloud auth print-access-token` | handler | none | planned |
 | 9 | **athena** — `query` shape via `jci_aws.py`; start → poll → page; README ships the IAM deny-writes policy since Athena has no pre-execution read-only check | handler | none | planned |
 | 10 | **llm** — text in, text out: `POST /summarize` etc. from stdin, `POST /chat`, `/chat/stream` SSE normalised, `GET /models`; Anthropic + OpenAI stdlib, Bedrock via `jci_aws.py`; key via `${VAR}`/keychain/`_cmd`, `max_tokens` cap per shell | handler | none | planned |

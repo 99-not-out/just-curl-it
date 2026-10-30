@@ -1,21 +1,18 @@
-"""SigV4 signer tests: the AWS test-suite vectors (vendored under
-tests/fixtures/sigv4/) plus the S3-specific path rules the suite doesn't
-cover. Run with:  PYTHONPATH=handlers/lib python3 -m unittest discover -s tests/unit
+"""SigV4 signer tests against handlers/lib/jci_aws.py: the AWS test-suite
+vectors (vendored under tests/fixtures/sigv4/) plus the S3-specific path
+rules the suite doesn't cover.
+Run with:  PYTHONPATH=handlers/lib python3 -m unittest discover -s tests/unit
 """
 import datetime
-import importlib.util
 import os
 import unittest
 from unittest import mock
 
+import jci_aws as sigv4
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 FIXTURES = os.path.join(REPO, "tests", "fixtures", "sigv4")
-
-_spec = importlib.util.spec_from_file_location(
-    "sigv4", os.path.join(REPO, "handlers", "lib", "aws-sigv4", "handler.py"))
-sigv4 = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sigv4)
 
 CREDS = sigv4.Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", None)
 NOW = datetime.datetime(2015, 8, 30, 12, 36, 0, tzinfo=datetime.timezone.utc)

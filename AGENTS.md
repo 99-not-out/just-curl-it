@@ -16,6 +16,7 @@ it works.
 | `lib/helpers.sh` | `jci-run`, `jci-routes`, `jci-info`, sourced into the env | bash |
 | `handlers/run` | dispatcher: `run <name>` picks the venv or `python3` and execs the handler | bash |
 | `handlers/lib/jci.py` | shared stdlib plumbing every Python handler imports | Python |
+| `handlers/lib/jci_aws.py` | SigV4 signer + AWS credential resolution, shared by aws-sigv4 / athena / bedrock paths | Python |
 | `handlers/lib/<name>/` | one handler: `handler.py\|sh`, `README.md`, optional `requirements.txt` | bash, Python |
 | `demos/` | optional: docker backends, the `demos` env, tour, client apps | — |
 | `tests/run.sh` | the suite — real shim, real curl; sources `tests/lib.sh` | bash |
