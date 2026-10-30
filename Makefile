@@ -9,12 +9,17 @@ ifeq ($(wildcard $(PYTHON)),)
 PYTHON := python3
 endif
 
-.PHONY: all build install demos-install test hooks clean
+.PHONY: all build install demos-install test test-handlers hooks clean
 
 all: build
 
 test: build
 	tests/run.sh
+
+# Docker-backed handler tests; needs `cd demos && docker compose up -d`
+# (sections for services that aren't running skip) and network for pip.
+test-handlers: build
+	tests/handlers.sh
 
 build:
 	cd lib && ./build.sh
