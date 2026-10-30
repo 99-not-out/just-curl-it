@@ -32,7 +32,16 @@ request": the `graphql` handler reads a document's top-level operation
 keyword and refuses `mutation`/`subscription` on `GET`. That keyword is
 the protocol's own declaration of intent (a `query` that writes is a
 server bug no client can detect), not a heuristic over what the body
-does, so it counts as the backend's classification. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
+does, so it counts as the backend's classification.
+
+Where the backend offers nothing pre-execution — Athena has no dry run and
+no read-only session — the mechanism is the credential: IAM / Lake
+Formation grants that make writes fail at the data layer. The `athena`
+handler's README ships that policy, and the handler reports the post-hoc
+`statementType` with a `warning` on any `GET` that turns out to have run
+DDL or non-SELECT DML, so a credential that isn't read-only is visible the
+first time rather than never. That is weaker than the other SQL handlers
+and the README says so in its own section. Redis `GET /kv/{k}` and Mongo `GET .../coll/{c}`
 are reads by construction. RabbitMQ `GET /stream/{q}/peek` was destructive
 (`basic_get` with auto-ack) and documented as the one leak in the unified
 shape; since ADR 0006 it fetches without ack and requeues, and `tail`

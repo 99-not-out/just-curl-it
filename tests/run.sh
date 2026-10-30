@@ -600,6 +600,134 @@ assert_match "bigquery bad token carries Google's message"   'invalid authentica
 kill "$BQ_PID" 2>/dev/null; wait "$BQ_PID" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+section "handler: athena"
+
+# A fake Athena JSON API that *recomputes the SigV4 signature* of every
+# request with jci_aws (so the signer is verified end to end, not just
+# shape-checked), then plays the StartQueryExecution / GetQueryExecution /
+# GetQueryResults state machine.
+cat > "$TMPDIR/athenaserver.py" <<'PYEOF'
+import datetime, http.server, json, re, sys
+sys.path.insert(0, sys.argv[1]); import jci_aws
+CREDS = jci_aws.Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", None)
+Q = {}
+def kind(sql):
+    w = (sql.strip().split() or ["?"])[0].upper()
+    return "DDL" if w in ("CREATE", "DROP", "ALTER") else ("UTILITY" if w in ("SHOW", "DESCRIBE") else "DML")
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/x-amz-json-1.1")
+        self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def _verify(self, body):
+        authz = self.headers.get("authorization", "")
+        m = re.search(r"SignedHeaders=([^,]+), Signature=([0-9a-f]+)", authz)
+        if not m or not authz.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"):
+            return "no SigV4 authorization"
+        signed = {h: self.headers.get(h, "") for h in m.group(1).split(";")}
+        now = datetime.datetime.strptime(self.headers["x-amz-date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+        creq, sh = jci_aws.canonical_request("POST", self.path, "", signed, body, "athena")
+        sts = jci_aws.string_to_sign(now, "eu-west-1", "athena", creq)
+        expect = jci_aws.authorization(CREDS, now, "eu-west-1", "athena", sh, sts)
+        return None if expect == authz else "signature mismatch"
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0); body = self.rfile.read(n)
+        bad = self._verify(body)
+        if bad:
+            return self._send(403, {"__type": "InvalidSignatureException", "message": bad})
+        target = self.headers.get("x-amz-target", "").split(".")[-1]
+        req = json.loads(body or b"{}")
+        if target == "StartQueryExecution":
+            qid = f"q-{len(Q)+1}"; Q[qid] = {"sql": req["QueryString"], "polls": 0, "ctx": req.get("QueryExecutionContext", {})}
+            return self._send(200, {"QueryExecutionId": qid})
+        if target == "GetQueryExecution":
+            q = Q[req["QueryExecutionId"]]; q["polls"] += 1
+            if "fail" in q["sql"]:
+                st = {"State": "FAILED", "StateChangeReason": "SYNTAX_ERROR: line 1:8: mismatched input"}
+            elif "slow" in q["sql"] and q["polls"] < 3:
+                st = {"State": "RUNNING"}
+            else:
+                st = {"State": "SUCCEEDED"}
+            return self._send(200, {"QueryExecution": {"QueryExecutionId": req["QueryExecutionId"],
+                "Status": st, "StatementType": kind(q["sql"]), "Query": q["sql"],
+                "QueryExecutionContext": q["ctx"], "Statistics": {"DataScannedInBytes": 2048, "TotalExecutionTimeInMillis": 120}}})
+        if target == "GetQueryResults":
+            q = Q[req["QueryExecutionId"]]
+            if kind(q["sql"]) != "DML":
+                return self._send(200, {"ResultSet": {"ResultSetMetadata": {"ColumnInfo": []}, "Rows": []}})
+            meta = {"ColumnInfo": [{"Name": "n", "Type": "bigint"}, {"Name": "s", "Type": "varchar"}]}
+            hdr = {"Data": [{"VarCharValue": "n"}, {"VarCharValue": "s"}]}
+            if "page" in q["sql"]:
+                if req.get("NextToken") == "nt1":
+                    return self._send(200, {"ResultSet": {"ResultSetMetadata": meta, "Rows": [{"Data": [{"VarCharValue": "3"}, {"VarCharValue": "c"}]}]}})
+                return self._send(200, {"ResultSet": {"ResultSetMetadata": meta, "Rows": [hdr, {"Data": [{"VarCharValue": "1"}, {"VarCharValue": "a"}]}, {"Data": [{"VarCharValue": "2"}, {"VarCharValue": "b"}]}]}, "NextToken": "nt1"})
+            return self._send(200, {"ResultSet": {"ResultSetMetadata": meta, "Rows": [hdr, {"Data": [{"VarCharValue": "7"}, {"VarCharValue": "seven"}]}]}})
+        if target == "ListDatabases":
+            return self._send(200, {"DatabaseList": [{"Name": "db1"}, {"Name": "db2"}]})
+        if target == "ListTableMetadata":
+            return self._send(200, {"TableMetadataList": [{"Name": "t1", "TableType": "EXTERNAL_TABLE"}]})
+        return self._send(400, {"__type": "InvalidRequestException", "message": "unknown target " + target})
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+PYEOF
+mkfifo "$TMPDIR/athport"
+"${PY:-python3}" "$TMPDIR/athenaserver.py" "$REPO/handlers/lib" > "$TMPDIR/athport" 2>"$TMPDIR/athenaserver.err" &
+ATH_PID=$!
+read -r ATH_PORT < "$TMPDIR/athport"
+cat > "$TMPDIR/ath.conf" <<EOF
+test.athena     $REPO/handlers/run athena
+test.athenabad  $REPO/handlers/run athena
+EOF
+cat > "$TMPDIR/ath-backends.conf" <<EOF
+[test.athena]
+upstream   = http://127.0.0.1:$ATH_PORT
+region     = eu-west-1
+database   = db1
+output     = s3://results-bucket/jci/
+access_key = AKIDEXAMPLE
+secret_key = wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
+[test.athenabad]
+upstream   = http://127.0.0.1:$ATH_PORT
+region     = eu-west-1
+access_key = AKIDEXAMPLE
+secret_key = not-the-right-secret
+EOF
+ath_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/ath.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/ath-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s --max-time 30 -w '\n%{http_code}' "$@"
+}
+RESP=$(ath_curl -G http://test.athena/query --data-urlencode 'sql=select 7 as n')
+assert_eq    "athena GET select -> 200 (signature verified upstream)" "200" "${RESP##*$'\n'}"
+assert_match "athena GET select typed rows, header row dropped" '"rows": [[7, "seven"]]' "${RESP%$'\n'*}"
+assert_match "athena GET reports the execution id"           '"executionId": "q-' "${RESP%$'\n'*}"
+assert_match "athena GET reports bytes scanned"              '"dataScannedBytes": 2048' "${RESP%$'\n'*}"
+assert_no_match "athena GET select carries no warning"       '"warning"' "${RESP%$'\n'*}"
+RESP=$(ath_curl -G http://test.athena/query --data-urlencode 'sql=select page')
+assert_match "athena GET follows NextToken"                  '"rows": [[1, "a"], [2, "b"], [3, "c"]]' "${RESP%$'\n'*}"
+RESP=$(ath_curl -G http://test.athena/query --data-urlencode 'sql=select slow')
+assert_match "athena GET polls RUNNING to SUCCEEDED"         '"rows": [[7, "seven"]]' "${RESP%$'\n'*}"
+RESP=$(ath_curl -G http://test.athena/query --data-urlencode 'sql=select fail')
+assert_eq    "athena GET failed query -> 400"                "400" "${RESP##*$'\n'}"
+assert_match "athena GET failed query carries the reason"    'SYNTAX_ERROR' "${RESP%$'\n'*}"
+RESP=$(ath_curl -G http://test.athena/query --data-urlencode 'sql=create table t2 (x int)')
+assert_eq    "athena GET create -> 200 (Athena has no pre-execution gate)" "200" "${RESP##*$'\n'}"
+assert_match "athena GET create is flagged as a warning"     '"warning"' "${RESP%$'\n'*}"
+assert_match "athena GET create reports DDL"                 '"statementType": "DDL"' "${RESP%$'\n'*}"
+RESP=$(ath_curl -X POST http://test.athena/query -d 'create table t2 (x int)')
+assert_eq    "athena POST create -> 200"                     "200" "${RESP##*$'\n'}"
+RESP=$(ath_curl http://test.athena/databases)
+assert_match "athena GET /databases"                         '"databases": ["db1", "db2"]' "${RESP%$'\n'*}"
+RESP=$(ath_curl 'http://test.athena/tables?database=db1')
+assert_match "athena GET /tables?database="                  '"t1"' "${RESP%$'\n'*}"
+RESP=$(ath_curl http://test.athenabad/databases)
+assert_eq    "athena wrong secret -> 502"                    "502" "${RESP##*$'\n'}"
+assert_match "athena wrong secret names the signature"       'signature' "${RESP%$'\n'*}"
+kill "$ATH_PID" 2>/dev/null; wait "$ATH_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF
