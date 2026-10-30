@@ -27,7 +27,7 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit; do
+for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit mqtt; do
     echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
 done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
@@ -163,6 +163,58 @@ if install_or_skip clickhouse clickhouse; then
     assert_eq    "clickhouse POST drop -> 200"                "200" "$(code "$OUT")"
     OUT=$(hcurl -G http://mylocal.clickhouse/query --data-urlencode 'sql=select * from nope_$$')
     assert_eq    "clickhouse bad SQL -> 400"                  "400" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "mqtt"
+if install_or_skip mqtt mqtt; then
+    T="jci/test/$$"
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/$T" -d 'hello')
+    assert_eq    "mqtt POST /stream -> 200"                   "200" "$(code "$OUT")"
+    assert_match "mqtt publish reports the topic"             "\"topic\": \"$T\"" "$(body "$OUT")"
+
+    # tail: subscribe in the background, publish, see it arrive as SSE
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$ROUTES" INTERCEPT_BACKENDS_CONF="$BACKENDS" \
+        JCI_HANDLERS="$JH/handlers" "$CURL" -sN --max-time 8 "http://mylocal.mqtt/stream/$T/tail" \
+        > "$TMPDIR/mqtt-tail.out" 2>/dev/null &
+    TAIL_PID=$!
+    sleep 1.5
+    hcurl -X POST "http://mylocal.mqtt/stream/$T" -d 'tailed-1' >/dev/null
+    for _ in $(seq 1 20); do grep -q 'tailed-1' "$TMPDIR/mqtt-tail.out" 2>/dev/null && break; sleep 0.25; done
+    assert_match "mqtt tail received the published message"  'tailed-1' "$(cat "$TMPDIR/mqtt-tail.out")"
+    assert_match "mqtt tail events carry the topic"          "\"topic\": \"$T\"" "$(cat "$TMPDIR/mqtt-tail.out")"
+    kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null
+
+    # wildcard tail: '+' matches one level
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$ROUTES" INTERCEPT_BACKENDS_CONF="$BACKENDS" \
+        JCI_HANDLERS="$JH/handlers" "$CURL" -sN --max-time 8 "http://mylocal.mqtt/stream/jci/+/w$$/tail" \
+        > "$TMPDIR/mqtt-wild.out" 2>/dev/null &
+    TAIL_PID=$!
+    sleep 1.5
+    hcurl -X POST "http://mylocal.mqtt/stream/jci/abc/w$$" -d 'wild-1' >/dev/null
+    for _ in $(seq 1 20); do grep -q 'wild-1' "$TMPDIR/mqtt-wild.out" 2>/dev/null && break; sleep 0.25; done
+    assert_match "mqtt wildcard tail matched"                'wild-1' "$(cat "$TMPDIR/mqtt-wild.out")"
+    kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null
+
+    # retained message: GET /stream/{t} is the one thing MQTT can "read back"
+    OUT=$(hcurl "http://mylocal.mqtt/stream/$T/r")
+    assert_eq    "mqtt GET topic with no retained -> 404"     "404" "$(code "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/$T/r?retain=1" -d 'keep-me')
+    assert_match "mqtt POST retain=1 acknowledged"            '"retain": true' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.mqtt/stream/$T/r")
+    assert_eq    "mqtt GET retained -> 200"                   "200" "$(code "$OUT")"
+    assert_match "mqtt GET retained returns the payload"      '"payload": "keep-me"' "$(body "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.mqtt/stream/$T/r")
+    assert_eq    "mqtt DELETE clears retained -> 200"         "200" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.mqtt/stream/$T/r")
+    assert_eq    "mqtt GET after DELETE -> 404"               "404" "$(code "$OUT")"
+
+    OUT=$(hcurl "http://mylocal.mqtt/streams")
+    assert_eq    "mqtt GET /streams -> 501 (no topic listing)" "501" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.mqtt/stream/$T/peek")
+    assert_eq    "mqtt GET /peek -> 501 (no replay)"          "501" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.mqtt/_info")
+    assert_match "mqtt /_info has shape"                      '"stream"' "$(body "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

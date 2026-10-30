@@ -53,6 +53,17 @@ services:
       start_period: 10s
     ports: ["8123:8123"]
 
+  mqtt:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "127.0.0.1", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    ports: ["1883:1883"]
+
   redis:
     image: redis:7-alpine
     healthcheck:

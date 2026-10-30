@@ -15,7 +15,7 @@ ADR unless it changes the handler contract (noted where it might).
 | 2 | **mysql** — `query` shape; GET under `START TRANSACTION READ ONLY` *plus* an `EXPLAIN` gate (MySQL DDL implicitly commits a read-only transaction and runs), single statement | handler | pymysql | **done** |
 | 3 | **clickhouse** — `query` shape over its HTTP port; GET sets server-side `readonly=1` | handler | none | **done** |
 | 4 | **graphql** — `GET /gql?query=&vars=&op=`, `POST /gql`, `GET /schema`, `GET /types/{T}`; GET refuses `mutation`/`subscription` documents (ADR 0005 records the exception) | handler | none | **done** |
-| 5 | **mqtt** — `stream` shape: publish, SSE tail with `+`/`#`, retained message as `GET /stream/{t}` | handler | paho-mqtt | planned |
+| 5 | **mqtt** — `stream` shape: publish, SSE tail with `+`/`#`, retained message as `GET /stream/{t}`, `DELETE` clears retained | handler | paho-mqtt | **done** |
 | 6 | **spec-aware `/_info`** — `openapi = <url>` on `proxy`; `asyncapi = <path\|url>` on stream handlers: channel menu, schema summary, example curls | feature | PyYAML for YAML specs (JSON needs none) | planned |
 | 7 | **`jci_aws.py`** — lift the SigV4 signer out of `aws-sigv4/handler.py` into a shared stdlib module for Athena and Bedrock | refactor | none | planned |
 | 8 | **bigquery** — `query` shape; GET dry-runs first and executes only `statementType == SELECT`; token via `gcloud auth print-access-token` | handler | none | planned |
