@@ -272,6 +272,67 @@ assert_match "sqlite missing file named"             'missing.db' "${RESP%$'\n'*
     || bad "sqlite created $TMPDIR/missing.db"
 
 # ---------------------------------------------------------------------------
+section "handler: unix-http"
+
+# An HTTP server on a Unix socket that echoes what it received -- the shape
+# of the Docker / Podman / systemd socket APIs.
+cat > "$TMPDIR/uxserver.py" <<'PYEOF'
+import http.server, json, os, socketserver, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def _echo(self):
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n).decode() if n else ""
+        out = json.dumps({"method": self.command, "path": self.path, "body": body,
+                          "x-tag": self.headers.get("x-tag"),
+                          "host": self.headers.get("host")}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+    do_GET = do_POST = do_PUT = do_DELETE = _echo
+    def address_string(self): return "unix"
+    def log_message(self, *a): pass
+
+class S(socketserver.UnixStreamServer):
+    allow_reuse_address = True
+
+path = sys.argv[1]
+if os.path.exists(path): os.unlink(path)
+S(path, H).serve_forever()
+PYEOF
+"${PY:-python3}" "$TMPDIR/uxserver.py" "$TMPDIR/s.sock" &
+UX_PID=$!
+for _ in $(seq 1 50); do [ -S "$TMPDIR/s.sock" ] && break; sleep 0.1; done
+
+cat > "$TMPDIR/ux.conf" <<EOF
+test.ux      $REPO/handlers/run unix-http
+test.uxnone  $REPO/handlers/run unix-http
+EOF
+cat > "$TMPDIR/ux-backends.conf" <<EOF
+[test.ux]
+socket = $TMPDIR/s.sock
+[test.uxnone]
+socket = $TMPDIR/none.sock
+EOF
+ux_curl() {
+    env "$PRELOAD_VAR=$DYLIB" INTERCEPT_CONFIG="$TMPDIR/ux.conf" \
+        INTERCEPT_BACKENDS_CONF="$TMPDIR/ux-backends.conf" JCI_HANDLERS="$REPO/handlers" \
+        "$CURL" -s -w '\n%{http_code}' "$@"
+}
+RESP=$(ux_curl -X POST 'http://test.ux/a/b?c=1' -H 'X-Tag: t' -d hi)
+assert_eq    "unix-http POST -> 200"                  "200" "${RESP##*$'\n'}"
+assert_match "unix-http method forwarded"             '"method": "POST"' "${RESP%$'\n'*}"
+assert_match "unix-http path+query forwarded"         '"path": "/a/b?c=1"' "${RESP%$'\n'*}"
+assert_match "unix-http body forwarded"               '"body": "hi"' "${RESP%$'\n'*}"
+assert_match "unix-http header forwarded"             '"x-tag": "t"' "${RESP%$'\n'*}"
+RESP=$(ux_curl http://test.uxnone/)
+assert_eq    "unix-http missing socket -> 502"        "502" "${RESP##*$'\n'}"
+assert_match "unix-http missing socket named"         'none.sock' "${RESP%$'\n'*}"
+kill "$UX_PID" 2>/dev/null; wait "$UX_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "method permissions"
 
 cat > "$TMPDIR/perms.conf" <<EOF
