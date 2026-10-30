@@ -16,6 +16,7 @@ this directory is the backends and the examples of using them.
 | `mylocal.mysql`    | `mysql`     | MySQL 8          | 3307 (host)  |
 | `mylocal.clickhouse` | `clickhouse` | ClickHouse (HTTP) | 8123       |
 | `mylocal.mqtt`     | `mqtt`      | Mosquitto        | 1883         |
+| `mylocal.memcached` | `memcached` | memcached       | 11211        |
 | `mylocal.mongo`    | `mongo`     | MongoDB          | 27017        |
 | `mylocal.rabbit`   | `rabbit`    | RabbitMQ + mgmt  | 5672 / 15672 |
 | `mylocal.smtp`     | `smtp`      | SMTP (MailHog)   | 1025 / 8025  |

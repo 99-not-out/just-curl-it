@@ -64,6 +64,16 @@ services:
       retries: 30
     ports: ["1883:1883"]
 
+  memcached:
+    image: memcached:1.6-alpine
+    command: ["memcached", "-m", "64"]
+    healthcheck:
+      test: ["CMD-SHELL", "echo version | nc -w 1 127.0.0.1 11211 | grep -q VERSION"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports: ["11211:11211"]
+
   redis:
     image: redis:7-alpine
     healthcheck:

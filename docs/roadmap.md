@@ -22,7 +22,7 @@ ADR unless it changes the handler contract (noted where it might).
 | 9 | **athena** — `query` shape via `jci_aws.py`; start → poll → page, typed rows, `/executions/{id}`; GET can't be gated pre-execution so the README ships the IAM deny-writes policy and the handler warns post-hoc; the test fixture recomputes every SigV4 signature | handler | none | **done** (fake API; not run live) |
 | 10 | **llm** — text in, text out verbs (`/summarize`, `/explain`, `/fix`, `/translate?to=`, `/complete`, `prompt_<verb>`), `POST /chat`, `/chat/stream` SSE normalised, `GET /models`; Anthropic + OpenAI stdlib, Bedrock Converse via `jci_aws.py` (stream = one chunk); key via `api_key*`, `max_tokens` hard cap | handler | none | **done** (fake providers; not run live) |
 | 11 | **asyncapi payload validation** — `validate = true` on kafka/rabbit/mqtt/redis rejects a `POST` whose body fails the channel's message schema (templated channels match); `strict` also refuses unknown channels | feature | jsonschema | **done** |
-| 12 | **memcached** — `kv` shape, text protocol | handler | none | planned |
+| 12 | **memcached** — `kv` shape, text protocol; `/keys` via `lru_crawler metadump`, `/stats` | handler | none | **done** |
 | 13 | **ldap** — `GET /search?base=&filter=`; read-only by nature | handler | ldap3 | planned |
 | 14 | **snowflake** — `query` shape, SQL REST API with key-pair JWT | handler | none (jwt via `hmac`? needs RSA → `cryptography`) | planned |
 | 15 | **nats** — `stream` shape; JetStream gives real peek/replay | handler | nats-py | later |

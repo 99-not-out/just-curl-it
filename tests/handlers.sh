@@ -27,7 +27,7 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit mqtt; do
+for h in redis postgres mysql clickhouse smtp kafka grpc mongo rabbit mqtt memcached; do
     echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
 done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
@@ -233,6 +233,33 @@ if install_or_skip mqtt mqtt; then
     assert_eq    "mqtt validate: enum violation -> 400"       "400" "$(code "$OUT")"
     OUT=$(hcurl -X POST "http://mylocal.mqtt/stream/home/kitchen/light" -d 'on')
     assert_eq    "mqtt validate: enum member -> 200"          "200" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "memcached"
+if install_or_skip memcached memcached; then
+    K="jci-test-$$"
+    OUT=$(hcurl -X PUT "http://mylocal.memcached/kv/$K" --data-binary 'hello')
+    assert_eq    "memcached PUT /kv -> 200"                   "200" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.memcached/kv/$K")
+    assert_eq    "memcached GET /kv -> value"                 "hello" "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.memcached/keys")
+    assert_match "memcached GET /keys lists it (lru_crawler)" "\"$K\"" "$(body "$OUT")"
+    OUT=$(hcurl -X PUT "http://mylocal.memcached/kv/$K-ttl?ex=1" --data-binary 'gone soon')
+    assert_eq    "memcached PUT with ?ex= -> 200"             "200" "$(code "$OUT")"
+    sleep 2
+    OUT=$(hcurl "http://mylocal.memcached/kv/$K-ttl")
+    assert_eq    "memcached expired key -> 404"               "404" "$(code "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.memcached/kv/$K")
+    assert_match "memcached DELETE -> deleted 1"              '"deleted": 1' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.memcached/kv/$K")
+    assert_eq    "memcached GET after DELETE -> 404"          "404" "$(code "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.memcached/kv/$K")
+    assert_match "memcached DELETE missing -> deleted 0"      '"deleted": 0' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.memcached/kv/has%20space")
+    assert_eq    "memcached key with a space -> 400"          "400" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.memcached/stats")
+    assert_match "memcached GET /stats"                       '"curr_items"' "$(body "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------
