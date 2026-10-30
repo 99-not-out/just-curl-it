@@ -27,7 +27,9 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres smtp; do echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"; done
+for h in redis postgres smtp kafka grpc mongo rabbit; do
+    echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
+done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
 # read-only GET together.
 echo "mylocal.postgres-ro  GET  $JH/handlers/run postgres" >> "$ROUTES"
@@ -111,6 +113,85 @@ if install_or_skip smtp smtp; then
         || bad "mailhog count did not increase" "$BEFORE -> $AFTER"
     OUT=$(hcurl -X POST http://mylocal.smtp/send -d 'not json')
     assert_eq    "smtp bad body -> 400"                "400" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "kafka"
+if install_or_skip kafka kafka; then
+    T="jci-test-$$"
+    OUT=$(hcurl -X POST "http://mylocal.kafka/stream/$T?key=k1" -d 'one')
+    assert_eq    "kafka POST /stream -> 200"             "200" "$(code "$OUT")"
+    assert_match "kafka produce reports offset"          '"offset"' "$(body "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.kafka/stream/$T?key=k2" -d 'two')
+    assert_eq    "kafka second POST -> 200"              "200" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.kafka/stream/$T/peek?limit=10")
+    assert_match "kafka peek sees both records"          '"count": 2' "$(body "$OUT")"
+    assert_match "kafka peek carries the key"            '"key": "k2"' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.kafka/stream/$T/peek?limit=10")
+    assert_match "kafka peek is non-destructive"         '"count": 2' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.kafka/streams")
+    assert_match "kafka GET /streams lists the topic"    "\"$T\"" "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.kafka/stream/$T")
+    assert_match "kafka GET /stream/{T} shows partitions" '"partitionCount"' "$(body "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.kafka/stream/$T")
+    assert_eq    "kafka DELETE /stream -> 501"           "501" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "grpc"
+if install_or_skip grpc grpc; then
+    OUT=$(hcurl http://mylocal.grpc/_services)
+    assert_match "grpc /_services lists Greeter"          'helloworld.Greeter' "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.grpc/helloworld.Greeter/SayHello -d '{"name":"jci"}')
+    assert_eq    "grpc unary call -> 200"                 "200" "$(code "$OUT")"
+    assert_match "grpc unary call reply"                  '"message": "Hello, jci!"' "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.grpc/helloworld.Greeter/NoSuch -d '{}')
+    assert_eq    "grpc unknown method -> 404"             "404" "$(code "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.grpc/helloworld.Greeter/SayHello -d 'not json')
+    assert_eq    "grpc bad JSON -> 400"                   "400" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "mongo"
+if install_or_skip mongo mongo; then
+    C="jci_test_$$"
+    OUT=$(hcurl -X POST "http://mylocal.mongo/db/jcitest/coll/$C" -H 'content-type: application/json' \
+          -d '{"name":"ada","n":1}')
+    assert_eq    "mongo POST insert -> 200"               "200" "$(code "$OUT")"
+    assert_match "mongo insert returns id"                '"insertedId"' "$(body "$OUT")"
+    OUT=$(hcurl -X POST "http://mylocal.mongo/db/jcitest/coll/$C" -H 'content-type: application/json' \
+          -d '[{"name":"bob","n":2},{"name":"cy","n":3}]')
+    assert_match "mongo insert_many count"                '"insertedCount": 2' "$(body "$OUT")"
+    OUT=$(hcurl -G "http://mylocal.mongo/db/jcitest/coll/$C" --data-urlencode 'filter={"n":{"$gte":2}}' \
+          --data-urlencode 'sort={"n":-1}')
+    assert_match "mongo find with filter+sort count"      '"count": 2' "$(body "$OUT")"
+    assert_match "mongo find sorted desc first is cy"     '"name": "cy"' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.mongo/db/jcitest/colls")
+    assert_match "mongo /colls lists it"                  "\"$C\"" "$(body "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.mongo/db/jcitest/coll/$C" -G --data-urlencode 'filter={}')
+    assert_match "mongo DELETE deletes 3"                 '"deletedCount": 3' "$(body "$OUT")"
+    OUT=$(hcurl -G "http://mylocal.mongo/db/jcitest/coll/$C" --data-urlencode 'filter=not json')
+    assert_eq    "mongo bad filter -> 400"                "400" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "rabbit"
+if install_or_skip rabbit rabbit; then
+    Q="jci-test-$$"
+    OUT=$(hcurl -X POST "http://mylocal.rabbit/stream/$Q" -d 'a')
+    assert_eq    "rabbit POST /stream -> 200"             "200" "$(code "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/stream/$Q/peek?limit=1")
+    assert_match "rabbit peek sees the message"           '"count": 1' "$(body "$OUT")"
+    assert_match "rabbit peek body"                       '"body": "a"' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/stream/$Q/peek?limit=1")
+    assert_match "rabbit peek is non-destructive"         '"count": 1' "$(body "$OUT")"
+    assert_match "rabbit re-peeked message is flagged redelivered" '"redelivered": true' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/stream/$Q")
+    assert_match "rabbit GET /stream/{q} still counts 1"  '"messageCount": 1' "$(body "$OUT")"
+    OUT=$(hcurl "http://mylocal.rabbit/streams")
+    assert_match "rabbit GET /streams lists the queue"    "\"$Q\"" "$(body "$OUT")"
+    OUT=$(hcurl -X DELETE "http://mylocal.rabbit/stream/$Q")
+    assert_match "rabbit DELETE purges 1"                 '"purged": 1' "$(body "$OUT")"
 fi
 
 summary

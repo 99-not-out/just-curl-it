@@ -1,0 +1,3 @@
+# import: grpc
+grpcio>=1.60
+grpcio-reflection>=1.60
