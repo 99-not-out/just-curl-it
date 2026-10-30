@@ -41,9 +41,13 @@ now regression tests: Postgres's simple-query protocol runs several
 statements, so `GET /query?sql=COMMIT;DROP TABLE x` ended the read-only
 transaction — `GET` now uses a prepared (single-statement) execute. SQLite
 opened read-only still wrote *other* files via `VACUUM INTO` and `ATTACH`
-— read-only connections now refuse attachments. The lesson for new
-handlers: "the backend refuses writes" must cover every channel the
-statement language has, not just the one you first thought of.
+— read-only connections now refuse attachments. MySQL's `START
+TRANSACTION READ ONLY` refuses DML but DDL implicitly commits it and runs,
+so the `mysql` handler adds a second server-side gate: `EXPLAIN <sql>`,
+which the parser accepts only for queries and DML and which executes
+nothing. The lesson for new handlers: "the backend refuses writes" must
+cover every channel the statement language has, not just the one you
+first thought of — and the test suite must try the hostile statements.
 
 ## Consequences
 

@@ -27,7 +27,7 @@ jh() { JCI_HOME="$JH" "$REPO/bin/jci" "$@"; }
 ROUTES="$TMPDIR/routes.conf"
 BACKENDS="$REPO/demos/env/backends.conf"
 : > "$ROUTES"
-for h in redis postgres smtp kafka grpc mongo rabbit; do
+for h in redis postgres mysql smtp kafka grpc mongo rabbit; do
     echo "mylocal.$h   $JH/handlers/run $h" >> "$ROUTES"
 done
 # Same postgres backend, GET-only route: the shim gate plus the handler's
@@ -104,6 +104,35 @@ if install_or_skip postgres postgres; then
     assert_match "postgres-ro GET select works"          '"rows": [[1]]' "$(body "$OUT")"
     OUT=$(hcurl -X POST http://mylocal.postgres/query -d "drop table $T")
     assert_eq    "postgres POST drop -> 200"             "200" "$(code "$OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+section "mysql"
+if install_or_skip mysql mysql; then
+    T="jci_test_$$"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode 'sql=select 1 as one')
+    assert_match "mysql GET select -> rows"               '"rows": [[1]]' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode "sql=create table $T(x int)")
+    assert_eq    "mysql GET create -> 405 (read-only)"     "405" "$(code "$OUT")"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode "sql=select 1; create table ${T}_esc(x int)")
+    [ "$(code "$OUT")" != "200" ] && ok "mysql GET multi-statement refused ($(code "$OUT"))" \
+        || bad "mysql GET multi-statement -> 200" "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.mysql/query -d "create table $T(x int)")
+    assert_eq    "mysql POST create -> 200"                "200" "$(code "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.mysql/query -H 'content-type: application/json' \
+          -d "{\"sql\":\"insert into $T values (%s)\",\"params\":[7]}")
+    assert_match "mysql POST insert with params"           '"rowCount": 1' "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode "sql=insert into $T values (8)")
+    assert_eq    "mysql GET insert -> 405"                 "405" "$(code "$OUT")"
+    OUT=$(hcurl http://mylocal.mysql/tables)
+    assert_match "mysql GET /tables lists it"              "$T" "$(body "$OUT")"
+    assert_no_match "mysql GET escape created nothing"     "${T}_esc" "$(body "$OUT")"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode "sql=select count(*) from $T")
+    assert_match "mysql GET sees exactly the POSTed row"   '"rows": [[1]]' "$(body "$OUT")"
+    OUT=$(hcurl -X POST http://mylocal.mysql/query -d "drop table $T")
+    assert_eq    "mysql POST drop -> 200"                  "200" "$(code "$OUT")"
+    OUT=$(hcurl -G http://mylocal.mysql/query --data-urlencode 'sql=select * from nope_$$')
+    assert_eq    "mysql bad SQL -> 400"                    "400" "$(code "$OUT")"
 fi
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,22 @@ services:
     # already on 5432. Update backends.conf if you change this.
     ports: ["5433:5432"]
 
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: demo
+      MYSQL_USER: demo
+      MYSQL_PASSWORD: demo
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-udemo", "-pdemo"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    # 3307 on the host so it doesn't collide with a local MySQL on 3306.
+    ports: ["3307:3306"]
+
   redis:
     image: redis:7-alpine
     healthcheck:

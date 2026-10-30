@@ -13,6 +13,7 @@ this directory is the backends and the examples of using them.
 | `mylocal.kafka`    | `kafka`     | Kafka            | 9092         |
 | `mylocal.redis`    | `redis`     | Redis            | 6379         |
 | `mylocal.postgres` | `postgres`  | PostgreSQL       | 5433 (host)  |
+| `mylocal.mysql`    | `mysql`     | MySQL 8          | 3307 (host)  |
 | `mylocal.mongo`    | `mongo`     | MongoDB          | 27017        |
 | `mylocal.rabbit`   | `rabbit`    | RabbitMQ + mgmt  | 5672 / 15672 |
 | `mylocal.smtp`     | `smtp`      | SMTP (MailHog)   | 1025 / 8025  |
@@ -27,7 +28,7 @@ inside the env prints them all.
 
 ```sh
 # from the repo root
-make demos-install                     # make install + jci handler install kafka redis postgres mongo rabbit grpc
+make demos-install                     # make install + jci handler install kafka redis postgres mysql mongo rabbit grpc
 cd demos && docker compose up -d       # bring up backends
 jci use demos                          # activate the env
 ```
