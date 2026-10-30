@@ -1,45 +1,44 @@
 # jci demos
 
-Optional add-on: a `demos` env that turns 7 backend services into plain HTTP
-endpoints, plus walkthrough scripts and demo apps in Python and Java to
-prove this works for any libc-resolving language, not just curl.
+Optional add-on: a `demos` env that puts seven backend services behind
+plain HTTP hostnames, plus a walkthrough script and client apps in Python
+and Java that prove this works for any libc-resolving language, not just
+curl. The handlers themselves live in the library (`jci handler ls`);
+this directory is the backends and the examples of using them.
 
 ## What you get
 
-| hostname           | backend          | typical port |
-|---                 |---               |---           |
-| `mylocal.kafka`    | Kafka            | 9092         |
-| `mylocal.redis`    | Redis            | 6379         |
-| `mylocal.postgres` | PostgreSQL       | 5432         |
-| `mylocal.mongo`    | MongoDB          | 27017        |
-| `mylocal.rabbit`   | RabbitMQ + mgmt  | 5672 / 15672 |
-| `mylocal.smtp`     | SMTP (MailHog)   | 1025 / 8025  |
-| `mylocal.grpc`     | gRPC helloworld  | 50051        |
-| `mylocal.shim`     | introspection    | (no backend) |
-| `mylocal.hello`    | bash echo        | (no backend) |
+| hostname           | handler     | backend          | typical port |
+|---                 |---          |---               |---           |
+| `mylocal.kafka`    | `kafka`     | Kafka            | 9092         |
+| `mylocal.redis`    | `redis`     | Redis            | 6379         |
+| `mylocal.postgres` | `postgres`  | PostgreSQL       | 5433 (host)  |
+| `mylocal.mongo`    | `mongo`     | MongoDB          | 27017        |
+| `mylocal.rabbit`   | `rabbit`    | RabbitMQ + mgmt  | 5672 / 15672 |
+| `mylocal.smtp`     | `smtp`      | SMTP (MailHog)   | 1025 / 8025  |
+| `mylocal.grpc`     | `grpc`      | gRPC helloworld  | 50051        |
+| `mylocal.shim`     | `shim-meta` | introspection    | (no backend) |
+| `mylocal.hello`    | `hello`     | bash echo        | (no backend) |
 
-Plus `GET /_info` on every endpoint that describes the routes it serves.
+Every handler answers `GET /_info` with the routes it serves; `jci-info`
+inside the env prints them all.
 
 ## Setup
 
 ```sh
 # from the repo root
-make demos-install                     # builds the shim, sets up venv, copies handlers
+make demos-install                     # make install + jci handler install kafka redis postgres mongo rabbit grpc
 cd demos && docker compose up -d       # bring up backends
 jci use demos                          # activate the env
 ```
 
-`demos-install` prefers Homebrew Python for the venv on macOS, only because
-it's newer than the 3.9 Apple ships. Handlers never load the shim (it's
-unset before they're exec'd), so SIP doesn't apply to them and system
-`/usr/bin/python3` would work too. Override with
-`make demos-install PYTHON=/path/to/python3` if needed. The SIP caveat
-*does* apply to the demo client apps below, which run inside the env.
+`demos-install` creates one venv per handler (network needed for pip).
+`smtp`, `hello` and `shim-meta` are stdlib-only and need no install.
 
 ## Tour
 
 ```sh
-demos/scripts/tour.sh                  # interactive walkthrough
+demos/scripts/tour.sh                  # interactive walkthrough, inside `jci use demos`
 ```
 
 ## Demo apps
@@ -49,8 +48,20 @@ python3 demos/apps/python/demo.py      # urllib only — no client libs
 java   demos/apps/java/Main.java       # java.net.http.HttpClient — no client libs
 ```
 
-Both reach all 7 backends with no SDK imports — every connect is intercepted
-and routed through the protocol handlers.
+Both reach every backend with no SDK imports: each connect is intercepted
+and routed through the handlers.
+
+**macOS:** these client apps run *inside* the env, so they need a
+non-SIP interpreter — Homebrew `python3` and `openjdk`, not the system
+ones, which strip `DYLD_INSERT_LIBRARIES`. (Handlers are unaffected; the
+shim is unset before they're exec'd.)
+
+## Tests
+
+```sh
+cd demos && docker compose up -d
+make test-handlers                     # from the repo root; sections skip for services that aren't up
+```
 
 ## Files
 
@@ -58,14 +69,9 @@ and routed through the protocol handlers.
 demos/
     docker-compose.yml          # backends, all ports mapped to localhost
     grpcdemo/                   # the gRPC helloworld service (built into compose)
-    handlers/                   # protocol adapters (HTTP -> wire protocol)
-        kafka.py redis_kv.py postgres.py mongo.py rabbit.py smtp.py
-        grpc_reflect.py shim.py shim_meta.py
-        run-handler             # bash wrapper: execs handler under managed venv
     env/                        # the demos jci env
-        routes.conf             # hostname -> handler
+        routes.conf             # hostname -> ${JCI_HANDLERS}/run <handler>
         backends.conf           # hostname -> service address
-    requirements.txt            # Python deps for the venv
     apps/
         python/demo.py
         java/Main.java

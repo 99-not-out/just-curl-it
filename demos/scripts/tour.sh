@@ -50,7 +50,7 @@ step "mongo" "insert then find" \
 step "kafka produce/peek" "stream shape -- POST one msg, GET /peek" \
      "curl -s -X POST 'http://mylocal.kafka/stream/demo?key=k1' -d 'one' | jq; curl -s -X POST 'http://mylocal.kafka/stream/demo?key=k2' -d 'two' | jq; curl -s 'http://mylocal.kafka/stream/demo/peek?limit=10' | jq"
 
-step "rabbit" "stream shape -- POST then peek" \
+step "rabbit" "stream shape -- POST then peek (non-destructive: the message is requeued)" \
      "curl -s -X POST http://mylocal.rabbit/stream/demo -d 'hi from curl' | jq; curl -s 'http://mylocal.rabbit/stream/demo/peek?limit=1' | jq"
 
 step "smtp" "send mail (open http://localhost:8025 for the mailhog UI)" \

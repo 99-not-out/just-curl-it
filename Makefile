@@ -1,13 +1,8 @@
 JCI_HOME ?= $(HOME)/.just_curl_it
 
-# Python for the demos venv. Handlers run shim-free (the shim unsets the
-# preload var before exec), so SIP is irrelevant here and macOS's system
-# python3 would work; brew's is preferred only because it's newer than the
-# 3.9 Apple ships. The core needs no venv at all -- proxy.py is stdlib-only.
-PYTHON ?= $(shell brew --prefix python 2>/dev/null)/bin/python3
-ifeq ($(wildcard $(PYTHON)),)
-PYTHON := python3
-endif
+# Handlers with dependencies get a venv each from `jci handler install`,
+# which picks the interpreter ($JCI_PYTHON, else brew's, else python3).
+# Nothing in the core needs a venv.
 
 .PHONY: all build install demos-install test test-handlers hooks clean
 
@@ -43,15 +38,13 @@ install: build
 	@echo
 	@echo "installed to $(JCI_HOME)"
 	@echo "add to PATH:  export PATH=\"$(JCI_HOME)/bin:\$$PATH\""
-	@echo "then try:     jci ls && jci use dev"
+	@echo "then try:     jci handler ls      (and 'make demos-install' for a ready-made env)"
+
+DEMO_HANDLERS = kafka redis postgres mongo rabbit grpc
 
 demos-install: install
-	@echo "Setting up demos venv with $(PYTHON)..."
-	$(PYTHON) -m venv $(JCI_HOME)/handlers/.venv
-	$(JCI_HOME)/handlers/.venv/bin/pip install --quiet --upgrade pip
-	$(JCI_HOME)/handlers/.venv/bin/pip install --quiet -r demos/requirements.txt
-	find demos/handlers -mindepth 1 -maxdepth 1 -type f -exec cp {} $(JCI_HOME)/handlers/ \;
-	chmod +x $(JCI_HOME)/handlers/*
+	@echo "Installing handlers for the demos env: $(DEMO_HANDLERS)"
+	JCI_HOME=$(JCI_HOME) $(JCI_HOME)/bin/jci handler install $(DEMO_HANDLERS)
 	mkdir -p $(JCI_HOME)/envs/demos
 	cp demos/env/routes.conf    $(JCI_HOME)/envs/demos/
 	cp demos/env/backends.conf  $(JCI_HOME)/envs/demos/

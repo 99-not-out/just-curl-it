@@ -120,7 +120,7 @@ stdout = response.
 
 ```ini
 # everything allowed
-mylocal.kafka       ${JCI_HANDLERS}/run-handler kafka
+mylocal.kafka       ${JCI_HANDLERS}/run kafka
 
 # only GET; POST/PUT/DELETE return 405
 mylocal.prod-db     GET             ${JCI_HANDLERS}/run postgres
@@ -216,7 +216,7 @@ knowing.
 ## Streaming
 
 Handlers can stream — the shim doesn't bound their lifetime once the
-client connects. `demos/handlers/shim.py` ships SSE primitives
+client connects. `handlers/lib/jci.py` ships SSE primitives
 (`send_sse_headers`, `sse_event`, `sse_comment`), and the demos use them:
 
 - `GET /stream/<n>/tail` — uniform across Kafka, Postgres LISTEN, Redis
